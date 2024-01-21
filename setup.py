@@ -19,6 +19,18 @@ setuptools.setup(
         "Operating System :: OS Independent",
     ],
     install_requires=[
+        "selenium",
+        "get-gecko-driver",
+        "beautifulsoup4",
+        "google-api-python-client",
+        "objdict_bf",
+        "odfpy",
+        "openai",
+        "PyPDF2",
+        "python-dotenv",
+        "python-docx",
+        "requests",
+        "tiktoken"
     ],
     python_requires='>=3.6',
 )
