@@ -1,7 +1,7 @@
 
-# Pandora AI 
+# Pandora
 
-Pandora is an advanced AI Python console, resulting from the combination of the latest GPT-4 Turbo model from OpenAI and an interactive Python interpreter supporting Streamlit commands. This console allows users to execute Python commands/scripts in real time like a conventional Python console, but also allows to interact in natural language with the assistant and offers rich interactive and multimodal capabilities based on the real-time execution of AI-generated python scripts.
+Pandora is an advanced AI Python console object, resulting from the combination of the latest GPT-4 Turbo model from OpenAI and an interactive Python interpreter. This console allows users to execute Python commands/scripts in real time like a conventional Python console, but also allows to interact in natural language with the assistant and offers rich interactive and multimodal capabilities based on the real-time execution of AI-generated python scripts.
 
 ## Main Features
 
