@@ -8,7 +8,7 @@ setuptools.setup(
     version="0.0.1",
     author="Baptiste Ferrand",
     author_email="bferrand.maths@gmail.com",
-    description="AI-powered python interpreter",
+    description="GPT4-powered python interpreter / AI assistant",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/B4PT0R/pandora_ai",
