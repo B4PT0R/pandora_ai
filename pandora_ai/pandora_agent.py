@@ -1284,10 +1284,9 @@ class Pandora:
                 "Your default workfolder: '<<self.work_folder>>' (save files you create there, and initial cwd of the python session).",
                 "Your config folder: '<<self.config_folder>>' (where your memory file, startup file and optional preprompts files are)"
                 ]
-        infos=[format(info,locals()) for info in infos]
         if infos:
             s="#Additional informations:\n"
-            s+='\n'.join(infos)
+            s+=format('\n'.join(infos),locals())
             msg=Message(content=s,role='system',name='system_bot')
             return [msg]
         else:
