@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="pandora_ai",
-    version="0.0.5",
+    version="0.0.6",
     author="Baptiste Ferrand",
     author_email="bferrand.maths@gmail.com",
     description="GPT4-powered python interpreter / AI assistant",
