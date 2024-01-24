@@ -849,7 +849,7 @@ class Pandora:
                 """
             )
         
-        if 'memory' in self.builtin_tools and self.memory:
+        if 'memory' in self.builtin_tools:
             self.add_tool(
                 name="memory",
                 description="memory # a custom nested attribute-style access data structure linked to a JSON file for long lasting storage. Supports dump() method to save the content to the file, and dumps() to serialize into a string. Nested keys must all be valid identifiers.",

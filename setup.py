@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="pandora_ai",
-    version="0.0.2",
+    version="0.0.3",
     author="Baptiste Ferrand",
     author_email="bferrand.maths@gmail.com",
     description="GPT4-powered python interpreter / AI assistant",
@@ -15,7 +15,7 @@ setuptools.setup(
     packages=setuptools.find_packages(),
     classifiers=[
         "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: MIT License",
+        "License :: OSI Approved :: GNU Affero General Public License",
         "Operating System :: OS Independent",
     ],
     install_requires=[
