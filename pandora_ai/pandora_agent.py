@@ -586,6 +586,28 @@ class Pandora:
     Can use the full range of common python packages in its scripts (provided they are installed and well known to the AI)
     """
     
+    @staticmethod
+    def setup_profiles_folder(path=None):
+        config=objdict.load(root_join("config.json"),_use_default=True)
+        config.profiles_folder=path or config.profiles_folder
+        if not config.profiles_folder:
+            config.profiles_folder="~/Pandora"
+        if not os.path.isdir(config.profiles_folder):
+            try:
+                os.mkdir(config.profiles_folder)
+            except Exception as e:
+                print(f"Error when attempting to create the profiles folder:\n{str(e)}")
+                print("Defaulting to '~/Pandora' as the profiles folder.")
+                config.profiles_folder="~/Pandora"
+        config.dump()
+        Pandora.profiles_folder=config.profiles_folder
+
+    profiles_folder=None
+
+    @staticmethod
+    def profiles_join(*args):
+        return os.path.join(Pandora.profiles_folder,*args)
+                
     #Default configuration
     default_config=objdict(
         username='User',
@@ -671,6 +693,7 @@ class Pandora:
         context_handler : a hook used for integration in chat interfaces, determines the context manager in which the display hook will be called (for instance an AI message container, a user message container, a system message container, a status message container...)
         #Note: By default (all hooks set to None) Pandora will send its outputs to stdout and won't implement text to speech.
         """
+        Pandora.setup_profiles_folder()
         self.name=name or 'Pandora'
         self.init_client(openai_client=openai_client,openai_api_key=openai_api_key)
         self.init_folders_and_files(work_folder=work_folder)
@@ -722,7 +745,7 @@ class Pandora:
         Creates them if necessary.
         Then sets the cwd to the workfolder
         """
-        self.work_folder=work_folder or root_join(self.name)
+        self.work_folder=work_folder or Pandora.profiles_join(self.name)
         if not os.path.exists(self.work_folder):
             os.mkdir(self.work_folder)
 
@@ -1645,7 +1668,7 @@ class Pandora:
                 custom_print(message.content+'\n')
             elif message.tag in ['status'] and not message.content=='#DONE#':
                 custom_print(message.content+'\n')
-        agent=Pandora(name=name,openai_client=self.client,display_hook=agent_display,context_handler=lambda msg:AgentContext(msg),**kwargs)
+        agent=Pandora(name=name,work_folder=os.path.join(self.work_folder,name),openai_client=self.client,display_hook=agent_display,context_handler=lambda msg:AgentContext(msg),**kwargs)
         return agent
     
     def magic_function(self,verbose=False):
