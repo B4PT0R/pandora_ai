@@ -13,6 +13,11 @@ setuptools.setup(
     long_description_content_type="text/markdown",
     url="https://github.com/B4PT0R/pandora_ai",
     packages=setuptools.find_packages(),
+    package_data={
+        'pandora_ai': [
+            'config.json'
+        ]
+    },
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
