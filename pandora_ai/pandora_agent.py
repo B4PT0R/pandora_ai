@@ -597,10 +597,14 @@ class Pandora:
                 os.makedirs(config.folder)
             except Exception as e:
                 print(f"Error when attempting to create Pandora's profiles folder:\n{str(e)}")
-                config.folder=os.path.expanduser("~/Pandora")
+                config.folder=root_join("UserFiles")
+                os.makedirs(config.folder)
                 print(f"Defaulting to '{config.folder}' as the profiles folder.") 
-                print("(Please create this folder manualy if this error persists.)")
-        config.dump()
+                print("(Call Pandora.setup_folder(your_folder_path) to choose another folder.)")
+        try:
+            config.dump()
+        except:
+            pass
         Pandora.folder=config.folder
 
     folder=None
