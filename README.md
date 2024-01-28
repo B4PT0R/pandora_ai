@@ -1,7 +1,7 @@
 
 # Pandora
 
-Pandora is an advanced AI Python console object, resulting from the combination of the latest GPT-4 Turbo model from OpenAI and an interactive Python interpreter. This console allows users to execute Python commands/scripts in real time like a conventional Python console, but also allows to interact in natural language with the assistant and offers rich interactive and multimodal capabilities based on the real-time execution of AI-generated python scripts.
+Pandora is an AI-powered Python console object, resulting from the combination of the latest GPT-4 Turbo model from OpenAI and a built-in interactive Python interpreter. This console allows users to execute Python commands/scripts in real time like a conventional Python console, but also allows to interact in natural language with the assistant and offers rich interactive and multimodal capabilities based on the real-time execution of AI-generated python scripts.
 
 ## Main Features
 
@@ -22,7 +22,13 @@ Powerful set of builtin tools to:
 - generate images via DALL-e 3,
 - persistent memory storage via an external json file.
 
-Also usable as an 'intelligent' python function capable of generating scripts autonomously and returning any kind of processed data or python object according to a query in natural language along with some kwargs passed in the call.
+Can also be used as an AI python function capable of generating scripts autonomously and returning any kind of processed data or python object according to a query in natural language along with some kwargs passed in the call, like so:
+
+```python
+primes=pandora("return the list of first n prime numbers greater than m", n=5, m=15)
+print(primes) # output: [17,19,23,29,31]
+```
+
 Can use the full range of common python packages in its scripts (provided they are installed and well known to the AI)
 
 ## Installation
@@ -33,16 +39,19 @@ $ pip install pandora-ai
 
 ## Usage
 
-Minimal setting:
+Using it with default setting is as minimal as:
 
 ```python
 from pandora_ai import Pandora
 
-agent=Pandora(openai_api_key=<your_api_key>)
+pandora=Pandora(openai_api_key=<your_api_key>) 
+# The Open API key can be ommited in the constructor if it exists as an environment variable. 
 
-agent.interact()
+pandora.interact() # enters a loop of interaction with the console-agent
 
 ```
+
+Yet the Pandora class is designed to be highly configurable and easily integrated in any interface or codebase. Please refer to the full documentation or visit the Streamlit  web app [here](https://pandora-ai.streamlit.app/) to get a sense of how it can be used in a full setup.
 
 ## License
 
