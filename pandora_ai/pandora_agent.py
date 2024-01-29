@@ -591,7 +591,7 @@ class Pandora:
         config=objdict.load(root_join("config.json"),_use_default=True)
         config.folder=path or config.folder
         if not config.folder:
-            config.folder=os.path.expanduser("~/Pandora")
+            config.folder=os.path.expanduser(os.path.join("~","Pandora"))
         if not os.path.isdir(config.folder):
             try:
                 os.makedirs(config.folder)
