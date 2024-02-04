@@ -86,6 +86,7 @@ class Console(InteractiveConsole):
         self.interceptor = IO_Interceptor(self)
         InteractiveConsole.__init__(self, self.namespace)
         self.mode=mode
+        self.current_code=None
         self.inputs = []
         self.results = []
         self.error = False
@@ -141,6 +142,7 @@ class Console(InteractiveConsole):
                     print(str(e))
                 else:
                     if output is not None:
+                        self.current_code=source
                         self.runcode(output)
                     else:
                         self.error = True
@@ -160,19 +162,22 @@ class Console(InteractiveConsole):
             with redirect_IOs(self.interceptor):  # context manager for I/O redirection
                 while line_index < len(lines) and not self.error:
                     current_lines.append(lines[line_index])
-                    source_code = "\n".join(current_lines)
+                    current_code="\n".join(current_lines)
                     try:
-                        compiled_code = code.compile_command(source_code, 'user', 'single')
+                        compiled_code = code.compile_command(current_code, 'user', 'single')
                         if compiled_code is not None:
+                            self.current_code=current_code
                             self.runcode(compiled_code)
                             current_lines = []
                     except SyntaxError as e:
                         if len(current_lines) > 1:
                             # Attempt to fix and recompile code by adding a newline
                             current_lines = current_lines[:-1] + ['']
+                            current_code="\n".join(current_lines)
                             try:
-                                compiled_code = code.compile_command("\n".join(current_lines), 'user', 'single')
+                                compiled_code = code.compile_command(current_code, 'user', 'single')
                                 if compiled_code is not None:
+                                    self.current_code=current_code
                                     self.runcode(compiled_code)
                                     current_lines = [lines[line_index]]  # Start with the last line for the next iteration
                                     continue
@@ -196,6 +201,9 @@ class Console(InteractiveConsole):
     def showtraceback(self):
         self.error = True
         InteractiveConsole.showtraceback(self)
+
+    def get_current_code(self):
+        return self.current_code
 
     def get_result(self): 
         # Quickly get the last output of the interpreter as a string
