@@ -13,9 +13,14 @@ from get_gecko_driver import GetGeckoDriver
 from shutil import which
 
 def get_webdriver():
-    if not os.path.isdir(root_join("tmp")):
-        os.mkdir(root_join("tmp"))
-    os.environ['TMPDIR']=root_join("tmp")
+    if os.getenv('ROOT_PATH'):
+        root_path=os.getenv('ROOT_PATH')
+        tmp_path=os.path.join(root_path,"tmp")
+    else:
+        tmp_path=root_join("tmp")
+    if not os.path.isdir(tmp_path):
+        os.makedirs(tmp_path)
+    os.environ['TMPDIR']=tmp_path
     path=which('geckodriver')
     if not path:
         # Install the latest version of GeckoDriver
