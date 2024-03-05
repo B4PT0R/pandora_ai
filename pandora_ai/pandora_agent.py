@@ -393,7 +393,7 @@ def total_tokens(messages):
 def play_audio(audio):
     if audio is not None and audio.get("bytes"):
         audio_file_like = io.BytesIO(audio["bytes"])
-        audio_segment = AudioSegment.from_file(audio_file_like, format="wav") 
+        audio_segment = AudioSegment.from_file(audio_file_like, format="mp3") 
         play(audio_segment)
 
 def text_to_audio(text, openai_api_key=None):
@@ -423,13 +423,9 @@ def text_to_audio(text, openai_api_key=None):
         sample_rate = audio.frame_rate
         sample_width = audio.sample_width
 
-        # Export audio to WAV in memory buffer
-        wav_buffer = io.BytesIO()
-        audio.export(wav_buffer, format="wav")
-
         # Return the required dictionary
         return {
-            "bytes": wav_buffer.getvalue(),
+            "bytes": mp3_buffer.getvalue(),
             "sample_rate": sample_rate,
             "sample_width": sample_width
         }
@@ -476,7 +472,7 @@ class OutputCollector:
             elif tag in ['assistant_message']:
                 stdout_write(content)
             elif tag in ['status'] and not content=='#DONE#':
-                stdout_write(content)
+                stdout_write(content+'\n')
 
         self.display=display_hook or default_display
 
@@ -536,16 +532,6 @@ class OutputCollector:
             if not message.get("no_add"):
                 self.agent.add_message(message)
 
-class Processor:
-
-    def __init__(self,processing_funcs=None):
-        self.processing_funcs=processing_funcs or []
-
-    def __call__(self,content):
-        for func in self.processing_funcs:
-            content=func(content)
-        return content
-
 class TokenProcessor:
 
     def __init__(self,size,processing_funcs=None):
@@ -558,19 +544,24 @@ class TokenProcessor:
             chunk=func(chunk)
         return chunk
     
-    def __call__(self,generator):
-        for token in generator:
-            self.buffer.append(token)
-            if len(self.buffer)>self.size:
-                chunk=''.join(self.buffer)
-                new_chunk=self.process(chunk)
-                self.buffer=tokenize(new_chunk)
-                while len(self.buffer)>self.size:
+    def __call__(self,content):
+        if isgenerator(content):
+            def reader():
+                for token in content:
+                    self.buffer.append(token)
+                    if len(self.buffer)>self.size:
+                        chunk=''.join(self.buffer)
+                        new_chunk=self.process(chunk)
+                        self.buffer=tokenize(new_chunk)
+                        while len(self.buffer)>self.size:
+                            yield self.buffer.pop(0)
+                    else:
+                        pass
+                while len(self.buffer)>0:
                     yield self.buffer.pop(0)
-            else:
-                pass
-        while len(self.buffer)>0:
-            yield self.buffer.pop(0)
+            return reader()
+        elif isinstance(content,str):
+            return self.process(content)
 
 class StreamSplitter:
     
@@ -606,36 +597,39 @@ class VoiceProcessor:
         self.audio_queue=Queue()
         self.output_queue=Queue()
         
-    def line_agregator(self,content):
-        self.line_queue=Queue()
-        def target(content):
-            line=""
-            for chunk in content:
-                while '\n' in chunk:
-                    parts=chunk.split('\n')
-                    line+=parts[0]
+    def line_splitter(self,content):
+        if isgenerator(content):
+            self.line_queue=Queue()
+            def target(content):
+                line=""
+                for chunk in content:
+                    while '\n' in chunk:
+                        parts=chunk.split('\n')
+                        line+=parts[0]
+                        self.line_queue.put(line)
+                        chunk='\n'.join(parts[1:])
+                        line=""
+                    else:
+                        line+=chunk
+                if line:
                     self.line_queue.put(line)
-                    chunk='\n'.join(parts[1:])
-                    line=""
-                else:
-                    line+=chunk
-            if line:
-                self.line_queue.put(line)
-            self.line_queue.put("#END#")
+                self.line_queue.put("#END#")
 
-        thread=self.agent.thread_decorator(Thread(target=target,args=(content,)))
-        thread.start()
+            thread=self.agent.thread_decorator(Thread(target=target,args=(content,)))
+            thread.start()
 
-        def reader():
-            while not (line:=self.line_queue.get())=="#END#":
-                yield line
-        return reader()
+            def reader():
+                while not (line:=self.line_queue.get())=="#END#":
+                    yield line
+            return reader()
+        elif isinstance(content,str):
+            return content.split('\n')
 
     def line_processor(self,content):
         self.audio_queue=Queue()
         def target(content):
             flag=False
-            for line in self.line_agregator(content):
+            for line in self.line_splitter(content):
                 if self.agent.config.voice_enabled and line:
                     if line.startswith('```') and not flag:
                         flag=True
@@ -663,15 +657,21 @@ class VoiceProcessor:
     def process(self,line,audio):
         if audio:
             def target1(line):
-                for token in tokenize(line):
-                    self.output_queue.put(token)
-                    time.sleep(0.2)
+                if self.agent.config.stream:
+                    for token in tokenize(line):
+                        self.output_queue.put(token)
+                        time.sleep(0.2)
+                else:
+                    self.output_queue.put(line)
                 self.output_queue.put('\n')
         else:
             def target1(line):
-                for token in tokenize(line):
-                    self.output_queue.put(token)
-                    time.sleep(0.02)
+                if self.agent.config.stream:
+                    for token in tokenize(line):
+                        self.output_queue.put(token)
+                        time.sleep(0.02)
+                else:
+                    self.output_queue.put(line)
                 self.output_queue.put('\n')
             
         def target2(audio):
@@ -692,19 +692,17 @@ class VoiceProcessor:
                 for line,audio in self.line_processor(content):
                     self.process(line,audio)
                 self.output_queue.put("#END#")
+            thread=self.agent.thread_decorator(Thread(target=target,args=(content,)))
+            thread.start()
+            def reader():
+                while not (token:=self.output_queue.get())=="#END#":
+                    yield token
+            return reader()
         else:
-            def target(content):
-                self.output_queue=Queue()
-                for token in content:
-                    self.output_queue.put(token)
-                self.output_queue.put("#END#")
-        thread=self.agent.thread_decorator(Thread(target=target,args=(content,)))
-        thread.start()
+            return content
+        
 
-        def reader():
-            while not (token:=self.output_queue.get())=="#END#":
-                yield token
-        return reader()
+        
        
 class Image:
 
@@ -993,6 +991,14 @@ class Pandora:
         self.init_config(config=config)
         self.init_preprompts(base_preprompt=base_preprompt,preprompt=preprompt,example=example,infos=infos)
         self.collector=OutputCollector(self,display_hook=display_hook,context_handler=context_handler)
+        processing_funcs=[
+                lambda chunk:chunk.replace("```run_python","```python"),
+                lambda chunk:chunk.replace(r"\(","$"),
+                lambda chunk:chunk.replace(r"\)","$"),
+                lambda chunk:chunk.replace(r"\[","$$"),
+                lambda chunk:chunk.replace(r"\]","$$")
+            ]
+        self.token_processor=TokenProcessor(size=5,processing_funcs=processing_funcs)
         self.init_console(console=console,input_hook=input_hook)
         self.init_TTS(text_to_audio_hook=text_to_audio_hook,audio_play_hook=audio_play_hook,thread_decorator=thread_decorator)
         self.init_tools(tools=tools,builtin_tools=builtin_tools,google_custom_search_api_key=google_custom_search_api_key,google_custom_search_cx=google_custom_search_cx)
@@ -1626,37 +1632,30 @@ class Pandora:
             else:
                 success=True
         if not success:
-            content="I'm sorry but there was a recurring error with the OpenAI server. Would you like me to try again?"
+            content="I'm sorry but there was a recurring error with the OpenAI server. Would you like me to try again?\n"
         else:
-            content=answer.choices[0].message.content
+            content=answer.choices[0].message.content.strip()+'\n'
 
         msg=Message(content=content,role="assistant",name=self.name)
         self.add_message(msg)
         self.response=content
         return content
 
+    def response_generator(self):
+        if self.config.stream:
+            return self.stream_generator()
+        else:
+            return self.gen_response()
+
     def process(self):
         
         self.new_turn=False
 
         self.collector.process_all()
-
-        processing_funcs=[
-                lambda chunk:chunk.replace("```run_python","```python"),
-                lambda chunk:chunk.replace(r"\(","$"),
-                lambda chunk:chunk.replace(r"\)","$"),
-                lambda chunk:chunk.replace(r"\[","$$"),
-                lambda chunk:chunk.replace(r"\]","$$")
-            ]
         
         self.status("Generating response.")
-
-        if self.config.stream:
-            processor=TokenProcessor(size=5,processing_funcs=processing_funcs)
-            content=self.voice_processor.speak(processor(self.stream_generator()))
-        else:
-            processor=Processor(processing_funcs=processing_funcs)
-            content=processor(self.gen_response())
+            
+        content=self.voice_processor.speak(self.token_processor(self.response_generator()))
         
         msg=Message(content=content,role="assistant",name=self.name,type="queued",tag="assistant_message",no_add=True)
         self.collector.collect(msg)
