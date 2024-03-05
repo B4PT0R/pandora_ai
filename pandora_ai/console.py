@@ -49,6 +49,26 @@ class IO_Interceptor:
     def flush(self):
         pass
 
+class SilentIO:
+    def __init__(self,console):
+        self.console = console
+        self.buffer = ''
+
+    def write(self, text):
+        # pour un comportement silencieux
+        self.buffer += text
+        if text.endswith('\n'):
+            self.console.results[-1].append(self.buffer)
+            self.buffer = ''
+
+    def readline(self):
+        # Pour simuler une entrée, retourner simplement une chaîne vide
+        return '\n'
+
+    def flush(self):
+        # Pas d'action nécessaire ici
+        pass
+
 def remove_empty_lines(script):
     # Regular expression for multiline string literals
     multiline_string_pattern = r"('''[\s\S]*?'''|\"\"\"[\s\S]*?\"\"\")"
@@ -84,6 +104,7 @@ class Console(InteractiveConsole):
         self.output_redirection_hook=output_redirection_hook
         self.input_redirection_hook=input_redirection_hook
         self.interceptor = IO_Interceptor(self)
+        self.silence=SilentIO(self)
         InteractiveConsole.__init__(self, self.namespace)
         self.mode=mode
         self.current_code=None
@@ -105,12 +126,13 @@ class Console(InteractiveConsole):
             self.inner_cwd=os.getcwd()
             os.chdir(self.outer_cwd)
 
-
-    def run(self,code):
-        if self.mode=="scripted":
+    def run(self, code):
+        if self.mode == "scripted":
             self.run_exec(code)
-        elif self.mode=="interactive":
+        elif self.mode == "interactive":
             self.run_eval(code)
+        elif self.mode == "silent":
+            self.run_silent(code)
         else:
             raise Exception('This execution mode is not supported by the Console object.')
 
@@ -193,6 +215,25 @@ class Console(InteractiveConsole):
                     finally:
                         line_index += 1
 
+    def run_silent(self, source):
+        self.error = False
+        self.inputs.append(source)
+        self.results.append([])
+        with self.switch_cwd():
+            with redirect_IOs(self.silence):
+                try:
+                    output = code.compile_command(source, 'user', 'exec')
+                except Exception as e:
+                    self.error = True
+                    print(str(e), file=sys.__stderr__)  # Imprimer les erreurs vers stderr réel pour le débogage
+                else:
+                    if output is not None:
+                        self.current_code = source
+                        self.runcode(output)
+                    else:
+                        self.error = True
+                        e = SyntaxError("Incomplete code isn't allowed to be executed.")
+                        print(str(e), file=sys.__stderr__)  # Imprimer vers stderr réel
 
     def update_namespace(self, *args,**kwargs): 
         # Updates the interpreter's namespace with a name:object dictionary

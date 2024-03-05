@@ -9,21 +9,22 @@ Usable both as a regular python console and/or an AI assistant.
 Capable of generating and running scripts autonomously in its own internal interpreter.
 Can be interacted with using a mix of natural language (markdown and LaTeX support) and python code. 
 Having the whole session in context. Including user prompts/commands, stdout outputs, etc... (up to 128k tokens)
-Highly customizable input/output redirection and display (including hooks for TTS) for an easy and user friendly integration in any kind of application. 
+Highly customizable input/output redirection and display (including support for streaming and hooks for TTS) for an easy and user friendly integration in any kind of application. 
 Modularity with custom tools passed to the agent and loaded in the internal namespace, provided their usage is precisely described to the AI (including custom modules, classes, functions, APIs).
 Powerful set of builtin tools to:
 - facilitate communication with the user, 
 - enable AI access to data/file content or module/class/function documentation/inspection,
 - files management (custom work and config folder, memory file, startup script, file upload)
-- access to external data (websearch tool, webpage reading), 
+- access to external data (websearch tool, webpage reading, selenium webdriver tool), 
 - notify status, 
-- generate images via DALL-e 3,
+- generate images via DALL-E 3,
 - persistent memory storage via an external json file.
 Also usable as an 'intelligent' python function capable of generating scripts autonomously and returning any kind of processed data or python object according to a query in natural language along with some kwargs passed in the call.
 Can use the full range of common python packages in its scripts (provided they are installed and well known to the AI)
 
 --------------------------------------------------------------------
 """
+
 
 #Imports
 import os
@@ -37,9 +38,6 @@ def root_join(*args):
 import io
 import re
 from openai import OpenAI
-from dotenv import load_dotenv
-load_dotenv(root_join(".env"))
-load_dotenv(os.path.join(os.getcwd(),".env"))
 import tiktoken
 import json
 import codeop
@@ -52,6 +50,12 @@ import base64
 import requests
 from regex_tools import process_regex,split,pack
 import textwrap
+from queue import Queue
+from threading import Thread
+from inspect import isgenerator
+from pydub import AudioSegment
+from pydub.playback import play
+
 
 #Utility Functions
 
@@ -266,11 +270,23 @@ def get_code_segments(code):
     parts=split(code,patterns)
     return parts
 
+def extract_python(text):
+    pattern = r'```run_python(.*?)```'
+    iterator = re.finditer(pattern, text, re.DOTALL)
+    result = []
+
+    for match in iterator:
+        # Ajouter le texte correspondant au group capturé
+        result.append(match.group(1))
+
+    return result
+
 def stdout_write(content):
     """
     Prints to terminal __stdout__ whatever the stdout redirection currently active
     """
     sys.__stdout__.write(content)
+    sys.__stdout__.flush()
 
 def split_string(string, delimiters):
     """
@@ -294,46 +310,6 @@ def split_string(string, delimiters):
     if current_substring:
         substrings.append(current_substring)
     return substrings
-
-def strip_newlines(string):
-    """
-    removes leading, trailing and double newlines found in a string
-    """
-    while len(string)>=1 and string[0]=='\n':
-        string=string[1:]
-    
-    while len(string)>=1 and string[-1]=='\n':
-        string=string[:len(string)-1]
-    
-    while not (newstring:=string.replace('\n\n', '\n'))==string:
-        string=newstring
-    return string
-
-encoding=tiktoken.get_encoding("cl100k_base")
-def token_count(string):
-    """
-    count tokens in a string
-    """
-    return len(encoding.encode(string))
-
-def pack_msg(messages):
-    """
-    Assembles a message list into a single string
-    """
-    text=''
-    for message in messages:
-        text+=message.name+':\n'
-        if not message.tag=='image':
-            text+=str(message.content)+'\n\n'
-        else:
-            text+='(Contains an Image file or URL)'+'\n\n'
-    return text       
-
-def total_tokens(messages):
-    """
-    Returns the total token count of a message list
-    """
-    return token_count(pack_msg(messages))
 
 def split_text(text, max_tokens):
     """
@@ -365,8 +341,371 @@ def split_text(text, max_tokens):
     
     return chunks
 
+def strip_newlines(string):
+    """
+    removes leading, trailing and double newlines found in a string
+    """
+    while len(string)>=1 and string[0]=='\n':
+        string=string[1:]
+    
+    while len(string)>=1 and string[-1]=='\n':
+        string=string[:len(string)-1]
+    
+    while not (newstring:=string.replace('\n\n', '\n'))==string:
+        string=newstring
+    return string
+
+encoding=tiktoken.get_encoding("cl100k_base")
+
+def tokenize(string):
+    int_tokens=encoding.encode(string)
+    str_tokens=[encoding.decode([int_token]) for int_token in int_tokens]
+    return str_tokens
+
+def token_count(string):
+    """
+    count tokens in a string
+    """
+    return len(encoding.encode(string))
+
+def pack_msg(messages):
+    """
+    Assembles a message list into a single string
+    """
+    text=''
+    for message in messages:
+        text+=message.name+':\n'
+        if not message.tag=='image':
+            text+=str(message.content)+'\n\n'
+        else:
+            text+='(Contains an Image file or URL)'+'\n\n'
+    return text       
+
+def total_tokens(messages):
+    """
+    Returns the total token count of a message list
+    """
+    return token_count(pack_msg(messages))
+
+
 ###Main Functions and Classes
 
+def play_audio(audio):
+    if audio is not None and audio.get("bytes"):
+        audio_file_like = io.BytesIO(audio["bytes"])
+        audio_segment = AudioSegment.from_file(audio_file_like, format="wav") 
+        play(audio_segment)
+
+def text_to_audio(text, openai_api_key=None):
+    
+    client=OpenAI(api_key=openai_api_key or os.getenv('OPENAI_API_KEY'))
+    
+    # Create MP3 audio
+    if text.strip():
+
+        mp3_buffer = io.BytesIO()
+
+        response = client.audio.speech.create(
+        model="tts-1",
+        voice="shimmer",
+        input=text
+        )
+
+        for chunk in response.iter_bytes():
+            mp3_buffer.write(chunk)
+
+        mp3_buffer.seek(0)
+
+        # Convert MP3 to WAV and make it mono
+        audio = AudioSegment.from_file(mp3_buffer,format="mp3").set_channels(1)
+
+        # Extract audio properties
+        sample_rate = audio.frame_rate
+        sample_width = audio.sample_width
+
+        # Export audio to WAV in memory buffer
+        wav_buffer = io.BytesIO()
+        audio.export(wav_buffer, format="wav")
+
+        # Return the required dictionary
+        return {
+            "bytes": wav_buffer.getvalue(),
+            "sample_rate": sample_rate,
+            "sample_width": sample_width
+        }
+    else:
+        return None
+
+class NoContext:
+    """
+    A context manager that does nothing, useful when no context manager is required to display a message.
+    """
+    def __init__(self,*args,**kwargs):
+        pass
+    def __enter__(self,*args,**kwargs):
+        pass
+    def __exit__(self,*args,**kwargs):
+        pass
+
+class OutputCollector:
+
+    """
+    Class handling the routing of messages sent by the user or agent to custom display and context manager methods. 
+    By default, all goes to stdout. But can be passed a display_hook and context_handler to customize the routing.
+    """
+
+    class DefaultContext:
+        def __init__(self,message):
+            if message.tag in ['assistant_message','interpreter']:
+                stdout_write(message.name+':\n')
+        def __enter__(self,*args,**kwargs):
+            pass
+        def __exit__(self,*args,**kwargs):
+            pass
+
+    def __init__(self,agent,display_hook=None,context_handler=None):
+        self.messages=[]
+        self.agent=agent
+        self.last_tag=None
+        self.context=None
+        self.status=None
+        self.context_handler=context_handler or (lambda message:OutputCollector.DefaultContext(message))
+        def default_display(content,tag,status):
+            if tag in ['interpreter']:
+                stdout_write(content)
+            elif tag in ['assistant_message']:
+                stdout_write(content)
+            elif tag in ['status'] and not content=='#DONE#':
+                stdout_write(content)
+
+        self.display=display_hook or default_display
+
+    def collect(self,new_message):
+        if new_message.type=='status':
+            self.collect_status(new_message)
+        else:
+            self.collect_default(new_message)
+
+    def collect_status(self,new_message):
+        if not new_message.content=="#DONE#":
+            if not self.status:
+                self.status=self.context_handler(new_message)
+            self.display(new_message.content,new_message.tag,self.status)
+        else:
+            if self.status:
+                self.display(new_message.content,new_message.tag,self.status)
+                self.status=None
+
+    def collect_default(self,new_message):
+        if new_message.tag==self.last_tag and self.messages:
+            message=self.messages[-1]
+            tag=message.tag
+            content=message.content
+        else:
+            self.last_tag=new_message.tag
+            self.process_all()
+            message=new_message
+            self.context=self.context_handler(new_message)
+            self.messages.append(new_message)
+            tag=new_message.tag
+            content=''
+        if isgenerator(new_message.content):
+            for chunk in new_message.content:
+                content+=chunk
+                if self.agent.config.display_mode=="cumulative":
+                    display_chunk=content
+                else:
+                    display_chunk=chunk
+                with self.context:
+                    self.display(display_chunk,tag,self.status)
+        elif isinstance(new_message.content,str):
+            content+=new_message.content
+            if self.agent.config.display_mode=="cumulative":
+                display_chunk=content
+            else:
+                display_chunk=new_message.content
+            with self.context:
+                self.display(display_chunk,tag,self.status)
+        message.content=content
+
+
+        
+    def process_all(self):
+        while self.messages:
+            message=self.messages.pop(0)
+            if not message.get("no_add"):
+                self.agent.add_message(message)
+
+class Processor:
+
+    def __init__(self,processing_funcs=None):
+        self.processing_funcs=processing_funcs or []
+
+    def __call__(self,content):
+        for func in self.processing_funcs:
+            content=func(content)
+        return content
+
+class TokenProcessor:
+
+    def __init__(self,size,processing_funcs=None):
+        self.size=size
+        self.buffer=[]
+        self.processing_funcs=processing_funcs or []
+    
+    def process(self,chunk):
+        for func in self.processing_funcs:
+            chunk=func(chunk)
+        return chunk
+    
+    def __call__(self,generator):
+        for token in generator:
+            self.buffer.append(token)
+            if len(self.buffer)>self.size:
+                chunk=''.join(self.buffer)
+                new_chunk=self.process(chunk)
+                self.buffer=tokenize(new_chunk)
+                while len(self.buffer)>self.size:
+                    yield self.buffer.pop(0)
+            else:
+                pass
+        while len(self.buffer)>0:
+            yield self.buffer.pop(0)
+
+class StreamSplitter:
+    
+    def __init__(self,generator,n):
+        self.generator=generator
+        self.queues=None
+        self.n=n
+        self.start_read_thread()
+
+    def start_read_thread(self):
+        self.queues=[Queue() for _ in range(self.n)]
+        thread=Thread(target=self.splitter)
+        thread.start()
+
+    def splitter(self):
+        for chunk in self.generator:
+            for q in self.queues:
+                q.put(chunk)
+        for q in self.queues:
+            q.put("#END#")
+
+    def get_reader(self,i):
+        def reader():
+            while not (chunk:=self.queues[i].get())=="#END#":
+                yield chunk
+        return reader()
+
+class VoiceProcessor:
+
+    def __init__(self,agent):
+        self.agent=agent
+        self.line_queue=Queue()
+        self.audio_queue=Queue()
+        self.output_queue=Queue()
+        
+    def line_agregator(self,content):
+        self.line_queue=Queue()
+        def target(content):
+            line=""
+            for chunk in content:
+                while '\n' in chunk:
+                    parts=chunk.split('\n')
+                    line+=parts[0]
+                    self.line_queue.put(line)
+                    chunk='\n'.join(parts[1:])
+                    line=""
+                else:
+                    line+=chunk
+            if line:
+                self.line_queue.put(line)
+            self.line_queue.put("#END#")
+
+        thread=self.agent.thread_decorator(Thread(target=target,args=(content,)))
+        thread.start()
+
+        def reader():
+            while not (line:=self.line_queue.get())=="#END#":
+                yield line
+        return reader()
+
+    def line_processor(self,content):
+        self.audio_queue=Queue()
+        def target(content):
+            flag=False
+            for line in self.line_agregator(content):
+                if self.agent.config.voice_enabled and line:
+                    if line.startswith('```') and not flag:
+                        flag=True
+                        audio=None
+                    elif flag and line.startswith("```"):
+                        flag=False
+                        audio=None
+                    elif flag:
+                        audio=None
+                    else:
+                        audio=self.agent.text_to_audio_hook(line)
+                else:
+                    audio=None
+                self.audio_queue.put((line,audio))
+            self.audio_queue.put("#END#")
+
+        thread=self.agent.thread_decorator(Thread(target=target,args=(content,)))
+        thread.start()
+
+        def reader():
+            while not (content:=self.audio_queue.get())=="#END#":
+                yield content
+        return reader()
+    
+    def process(self,line,audio):
+        if audio:
+            def target1(line):
+                for token in tokenize(line):
+                    self.output_queue.put(token)
+                    time.sleep(0.2)
+                self.output_queue.put('\n')
+        else:
+            def target1(line):
+                for token in tokenize(line):
+                    self.output_queue.put(token)
+                    time.sleep(0.02)
+                self.output_queue.put('\n')
+            
+        def target2(audio):
+            self.agent.audio_play_hook(audio)
+        thread1=Thread(target=target1,args=(line,))
+        thread1.start()
+        if self.agent.config.voice_enabled:
+            thread2=self.agent.thread_decorator(Thread(target=target2,args=(audio,)))
+            thread2.start()
+        thread1.join()
+        if self.agent.config.voice_enabled:
+            thread2.join()
+
+    def speak(self,content):
+        if self.agent.audio_play_hook is not None and self.agent.text_to_audio_hook is not None and self.agent.config.voice_enabled:
+            def target(content):
+                self.output_queue=Queue()
+                for line,audio in self.line_processor(content):
+                    self.process(line,audio)
+                self.output_queue.put("#END#")
+        else:
+            def target(content):
+                self.output_queue=Queue()
+                for token in content:
+                    self.output_queue.put(token)
+                self.output_queue.put("#END#")
+        thread=self.agent.thread_decorator(Thread(target=target,args=(content,)))
+        thread.start()
+
+        def reader():
+            while not (token:=self.output_queue.get())=="#END#":
+                yield token
+        return reader()
+       
 class Image:
 
     """
@@ -431,6 +770,75 @@ class Image:
         msg=Message(content=content,role='system',name='image',type='temp',tag='image',image=self)
         return msg
 
+class Tool:
+    """
+    Tool object used to pass custom tools to the AI.
+    """
+
+    def __init__(self,name,description,obj,type='function',example=None,parameters=None,required=None,mode="python"):
+        self.mode=mode
+        self.type=type
+        self.name=name
+        self.description=description
+        self.example=example
+        self.obj=obj
+        self.parameters=parameters or {}
+        self.required=required or []
+    
+    def get_description(self):
+        desc="Name: "+self.name+'\n'
+        desc+="Type: "+self.type+"\n"
+        desc+="Description: "+self.description+'\n'
+        if self.parameters:
+            desc+="Parameters:\n"
+            for name,param in self.parameters.items():
+                    desc+='\t'+name+':\n'
+                    if isinstance(param,dict):
+                        if param.get("type"):
+                            desc+='\t\t'+"Type: "+param["type"]+'\n'
+                        if param.get("description"):
+                            desc+='\t\t'+'Description: '+textwrap.dedent(param["description"])+'\n'
+                        if param.get("enum"):
+                            desc+='\t\t'+'Accepted values: '+str(param["enum"])+'\n'
+                    elif isinstance(param,str):
+                        desc+='\t\t'+'Description: '+textwrap.dedent(param)+'\n'
+
+                    if name in self.required:
+                        desc+='\t\t'+"Required: Yes"+'\n'
+                    else:
+                        desc+='\t\t'+"Required: No"+'\n'
+                        
+        if self.example:
+            desc+="Example:\n"
+            desc+="###\n"
+            desc+=textwrap.dedent(self.example)+'\n'
+            desc+="###\n"
+        return desc
+
+    def get_dict(self):
+        properties=dict()
+        for name,param in self.parameters.items():
+            if isinstance(param,dict):
+                properties[name]=param
+            elif isinstance(param,str):
+                properties[name]=dict(description=param)
+        tool=dict(
+            type=self.type,
+            function=dict(
+                name=self.name,
+                description=self.description,
+                parameters=dict(
+                    type="object",
+                    properties=properties
+                ),
+                required=self.required
+            )
+        )
+        return tool
+
+    def __call__(self,*args,**kwargs):
+        return self.obj(*args,**kwargs)
+
 def Message(content,role,name,type="queued",tag="default",**kwargs):
     """
     Returns a custom message (objdict instance) with additional / optional metadata
@@ -453,139 +861,13 @@ def Sort(messages):
     """
     return sorted(messages, key=lambda msg: msg.timestamp)
 
-class NoContext:
-    """
-    A context manager that does nothing, useful when no context manager is required to display a message.
-    """
-    def __init__(self,*args,**kwargs):
-        pass
-    def __enter__(self,*args,**kwargs):
-        pass
-    def __exit__(self,*args,**kwargs):
-        pass
-
-class OutputCollector:
-
-    """
-    Class handling the routing of messages received by the user and agent to custom display and context manager methods. 
-    By default, all goes to stdout. But can be passed a display_hook and context_handler to customize the routing.
-    """
-
-    class DefaultContext:
-        def __init__(self,message):
-            if message.tag in ['assistant_message','interpreter']:
-                stdout_write(message.name+':\n')
-        def __enter__(self,*args,**kwargs):
-            pass
-        def __exit__(self,*args,**kwargs):
-            pass
-
-    def __init__(self,agent,display_hook=None,context_handler=None):
-        self.messages=[]
-        self.agent=agent
-        self.last_tag=None
-        self.context=None
-        self.status=None
-        self.context_handler=context_handler or (lambda message:OutputCollector.DefaultContext(message))
-        def default_display(message,status):
-            if message.tag in ['interpreter']:
-                stdout_write(message.content)
-            elif message.tag in ['assistant_message']:
-                stdout_write(message.content+'\n')
-            elif message.tag in ['status'] and not message.content=='#DONE#':
-                stdout_write(message.content+'\n')
-
-        self.display=display_hook or default_display
-
-    def collect(self,new_message):
-        if new_message.type=='status':
-            self.collect_status(new_message)
-        else:
-            self.collect_default(new_message)
-
-    def collect_status(self,new_message):
-        if not new_message.content=="#DONE#":
-            if not self.status:
-                self.status=self.context_handler(new_message)
-            self.display(new_message,self.status)
-        else:
-            if self.status:
-                self.display(new_message,self.status)
-                self.status=None
-
-    def collect_default(self,new_message):
-        if new_message.tag==self.last_tag and self.messages:
-            message=self.messages[-1]
-            message.content+='\n'+new_message.content
-        else:
-            self.last_tag=new_message.tag
-            self.context=self.context_handler(new_message)
-            self.process_all()
-            self.messages.append(new_message)
-        with self.context:
-            self.display(new_message,self.status)
-        
-    def process_all(self):
-        while self.messages:
-            message=self.messages.pop(0)
-            if not message.get("no_add"):
-                self.agent.add_message(message)
-
-class Tool:
-    """
-    Tool object used to pass custom tools to the AI.
-    """
-
-    def __init__(self,name,description,obj,type='function',example=None,parameters=None,required=None):
-        self.type=type
-        self.name=name
-        self.description=description
-        self.example=example
-        self.obj=obj
-        self.parameters=parameters or {}
-        self.required=required or []
-    
-    def get_description(self):
-        desc=self.name+" ("+self.type+"):\n"
-        desc+="Signature / Usage: "+self.description+'\n'
-        if self.parameters:
-            desc+="Parameters:\n"
-            for p in self.parameters:
-                if p in self.required:
-                    desc+='\t'+p+' : '+'(required) '+self.parameters[p]+'\n'
-                else:
-                    desc+='\t'+p+' : '+'(optional) '+self.parameters[p]+'\n'
-        if self.example:
-            desc+="Example:\n"
-            desc+="###\n"
-            desc+=textwrap.dedent(self.example)+'\n'
-            desc+="###\n"
-        return desc
-
-    def __call__(self,*args,**kwargs):
-        return self.obj(*args,**kwargs)
-
 class Pandora:
     """
-    Class implementing a custom AI-powered python console using OpenAI GPT4 model.
-    Usable both as a regular python console and/or an AI assistant.
-    Capable of generating and running scripts autonomously in its own internal interpreter.
-    Can be interacted with using a mix of natural language (markdown and LaTeX support) and python code. 
-    Having the whole session in context. Including user prompts/commands, stdout outputs, etc... (up to 128k tokens)
+    Class implementing a regular OpenAI AI agent.
     Highly customizable input/output redirection and display (including hooks for TTS) for an easy and user friendly integration in any kind of application. 
-    Modular usage of custom tools provided their usage is precisely described to the AI (including custom modules, classes, functions, APIs).
-    Powerful set of builtin tools to:
-    - facilitate communication with the user, 
-    - enable AI access to data/file content or module/class/function documentation/inspection,
-    - files management (custom work and config folder, folder visibility, file upload/download features)
-    - access to external data (websearch tool, webpage reading), 
-    - notify status, 
-    - generate images via DALL-e 3,
-    - persistent memory storage via an external json file.
-    Also usable as an 'intelligent' python function capable of generating scripts autonomously and returning any kind of processed data or python object according to a query in natural language along with some kwargs passed in the call.
-    Can use the full range of common python packages in its scripts (provided they are installed and well known to the AI)
+    Modular usage of custom function tools provided their usage is precisely described to the AI.
     """
-    
+
     @staticmethod
     def setup_folder(path=None):
         config=objdict.load(root_join("config.json"),_use_default=True)
@@ -612,118 +894,120 @@ class Pandora:
     @staticmethod
     def folder_join(*args):
         return os.path.join(Pandora.folder,*args)
-                
+    
     #Default configuration
     default_config=objdict(
         username='User',
-        code_replacements=[],
-        model="gpt-4-1106-preview",
+        model="gpt-4-vision-preview",
+        vision_enabled=True,
+        voice_enabled=True,
         enabled=True,
-        vision=False,
-        voice_mode=True,
         language='en',
         uses_memory=True,
         uses_past=True,
         uses_agents=True,
-        top_p=0.5,
+        top_p=1,
         temperature=1,
         max_tokens=2000,
-        token_limit=32000,
-        n=1,
-        stream=False,
-        stop=["system:"],
-        presence_penalty=0,
-        frequency_penalty=0,
-        logit_bias=None
+        token_limit=16000,
+        stream=True,
+        display_mode="normal"
     )
 
     #Default base preprompt used to instruct the AI, should be tweaked with caution. 
     base_preprompt="""
         #INSTRUCTIONS
-        You're <<self.name>>, an advanced AI-powered python console, resulting of the combination of the latest OpenAI model and a python interpreter.
-        The user can use you as a regular python console, interact with you in many languages or pass you files/images that you may analyze using your multimodal abilities.
-        As an AI model, you've been trained to use Python as your primary language: All your responses are 100% python code, automatically sent to execution in the built-in interpreter.
-        This setting allows you to perform anything that can be done with Python. 
-        On top of usual python libraries that you may import, additionnal tools are preloaded in the interpreter's namespace to enable you to perform specific tasks conveniently.
-        Communication with the user is performed by using the built-in 'message' tool (except instructed otherwise).
-        All the other tools prepared for you and how you should use them will be detailed in the 'TOOLS' section below.
-        As a Pandora class instance, you're preloaded in your built-in console's namespace under the name <<self.instance_name>>.
-        This setting allows the user to interact with you and call your methods programaticaly.
+        You're <<self.name>>, an advanced AI-powered python console resulting of the combination of the latest OpenAI model and a built-in Python interpreter.
+        The user can use you as a regular python console in which he can execute code directly.
+        He may as well interact with you in many languages or pass you files/images that you may analyze using your multimodal abilities.
+        As an AI model, you've been especialy trained to use the Python interpreter as your primary means action. 
+        Your responses are parsed and all parts matching the regex pattern r'```run_python(.*?)```' will be both shown as code snippet to the user, and executed directly in your interpreter.
+        The other parts of your response will be displayed as markdown chat messages (KaTeX is supported).
+        Notably, parts matching r'```python(.*?)```' will only be shown as code snippets but won't be executed. 
+        You can mix executed scripts and markdown messages in a same response. The parser will handle everything sequentially.
+        This setting allows to convienently explain what you're doing as you're doing it.
 
-        Important note: You should always attempt to run computations first. Only then will you be able to craft an informed response to the user.
+        Simple rule put shortly : If a task requires you to run code, just run the code, now!
+        Any action you announce should be executed in the same response in which you announced it. 
 
-        Over-simplified example of expected behaviour:
+        Use the interpreter's feedback to inform your next steps or self-correct coding mistakes autonomously.
+        The code is run on the user's local system and can therefore use any library installed on the user's computer (most common libraries are installed and can be imported). 
+        In case you run into unexpected execution issues or don't what/how to do, default back to asking the user for guidance.
 
-        User:
-        What is the factorial of 12?
+        Some specific tools are predeclared in your interpreter's namespace to help you deal with specific tasks.
+        All these tools and how you should use them in your scripts will be detailed in the 'TOOLS' section below.
 
-        Assistant:
-        import math
-        math.factorial(12)
-        #finish script here to let computations resolve and get the interpreter's feedback.
+        Example behavior:
+
+        user:
+        Plot a sine function please. Explain the steps so that I understand how it's done.
+
+        assistant:
+        Sure, let's plot a sine function. 
+        We'll use matplotlib for plotting the graph and numpy for numerical computations.
+        
+        First let's import the required libraries:
+        ```run_python
+        import matplotlib.pyplot as plt
+        import numpy as np
+        ```
+
+        Then let's create an array of x values from $0$ to $2\pi$ and calculate the sine of x using numpy.
+        ```run_python
+        # Generate an array of x values from 0 to 2*pi
+        x = np.linspace(0, 2 * np.pi, 100)
+        # Calculate the sine of x
+        y = np.sin(x)
+        ```
+
+        Plotting the curve is straightforward with pyplot:
+        ```run_python
+        # Plot the sine curve
+        plt.plot(x, y)
+        # Add some labels and title 
+        plt.xlabel('x values from 0 to 2π')
+        plt.ylabel('sin(x)')
+        plt.title('Plot of the sine function')
+        # Show the plot on screen
+        plt.show()
+        ```
+        Now we'll let these scripts execute to see the result.
 
         Interpreter:
-        479001600
+        [<matplotlib.lines.Line2D object at 0x7f61715d8280>]
+        Text(0.5, 0, 'x values from 0 to 2π')
+        Text(0, 0.5, 'sin(x)')
+        Text(0.5, 1.0, 'Plot of the sine function')
 
-        Assistant:
-        #Use an adequate communication tool the send your response to the user, informed by the interpreter's result.
+        assitant:
+        You should now be able to see the plot. If you need more explanations, feel free to ask!
 
         #END OF INSTRUCTIONS
         """
 
-    def __init__(self,name=None,openai_client=None,openai_api_key=None,config=None,work_folder=None,base_preprompt=None,preprompt=None,builtin_tools=None,tools=None,example=None,infos=None,console=None,text_to_audio_hook=None,audio_play_hook=None, input_hook=None,display_hook=None, context_handler=None):
-        """
-        Initializes the Pandora instance
-        All kwargs below are optional :
-        name : The name of the AI assistant, defaults to 'Pandora'. Will determine the name of the object instance in its own namespace (in lower case).
-        openai_client : you may pass directly an authenticated openai client to initialize the instance
-        openai_api_key : or you may provide an api key (a new client will be initialized with it). If you don't pass any, the instance will attempt to retrieve it as an environment variable.
-        #Note: the instance will still work as a regular python console in case a client can't be initialized.
-        work_folder : path to the desired workfolder. If None, the instance will create one in the cwd named 'Pandora'.
-        config_folder : path to the desired config folder (the instance will look for config files there), default to 'config' in the workfolder.
-        base_preprompt : Core preprompt, necessary to instruct the AI it is a python console and should work in python language exclusively. Can be customized, but will most likely break the AI intergation in the python environment if not carefully crafted. None = default base_preprompt
-        preprompt : secondary preprompt to give custom instructions to the AI, you can safely tweak this one as you wish.
-        builtin_tools : a list of builtin tools amongst ['message','codeblock','status','memory','observe','generate_image'] that the AI will be allowed to use. None = all
-        tools : a dict of custom Tool objects that the AI will be able to use (can be any python module, class, object, function, variable... provided a precise enough description so that the AI knows how to use it correctly).
-        example : an example string showing the AI how it should behave / use tools in the context of a conversation with the user (can gather several such examples).
-        infos : a list strings, giving custom useful informations for the AI.
-        console : the console object that the AI will use to run code (should be an instance of the Console class provided in the package)
-        memory_file : a json file where the AI will be able to store informations in the long run.
-
-        #Custom redirection hooks:
-        text_to_audio_hook : a custom hook to implement TTS. Takes a text and a language, returns an audio object (any type). expected usage: audio=text_to_audio_hook(text,language=None)
-        audio_play_hook : a custom audio auto player, should be able to play audio objects as returned by the text_to_audio_hook. expected usage: audio_play_hook(audio) # should play the audio immediately
-        input_hook : a hook used to redirect stdin to a custom interface
-        display_hook : a hook used by the collector to determine what method it should use to display or route messages depending on their type/tag
-        context_handler : a hook used for integration in chat interfaces, determines the context manager in which the display hook will be called (for instance an AI message container, a user message container, a system message container, a status message container...)
-        #Note: By default (all hooks set to None) Pandora will send its outputs to stdout and won't implement text to speech.
-        """
+    def __init__(self,name=None,openai_api_key=None,google_custom_search_api_key=None,google_custom_search_cx=None,config=None,base_preprompt=None,preprompt=None,tools=None,builtin_tools=None,example=None,infos=None,work_folder=None,console=None,input_hook=None, display_hook=None,context_handler=None,text_to_audio_hook=None,audio_play_hook=None,thread_decorator=None):
         Pandora.setup_folder()
         self.name=name or 'Pandora'
-        self.init_client(openai_client=openai_client,openai_api_key=openai_api_key)
+        self.init_client(openai_api_key=openai_api_key)
         self.init_folders_and_files(work_folder=work_folder)
         self.init_config(config=config)
         self.init_preprompts(base_preprompt=base_preprompt,preprompt=preprompt,example=example,infos=infos)
-        self.collector=OutputCollector(self,display_hook=display_hook,context_handler=context_handler)     
+        self.collector=OutputCollector(self,display_hook=display_hook,context_handler=context_handler)
         self.init_console(console=console,input_hook=input_hook)
-        self.init_TTS(text_to_audio_hook=text_to_audio_hook,audio_play_hook=audio_play_hook)
-        self.init_tools(tools=tools,builtin_tools=builtin_tools)
+        self.init_TTS(text_to_audio_hook=text_to_audio_hook,audio_play_hook=audio_play_hook,thread_decorator=thread_decorator)
+        self.init_tools(tools=tools,builtin_tools=builtin_tools,google_custom_search_api_key=google_custom_search_api_key,google_custom_search_cx=google_custom_search_cx)
         self.messages=[]
         self.new_turn=False
         self.output=None
-        self.run_script(self.startup_file)
+        self.token_queue=Queue()
+        self.console_queue=Queue()
+        self.run_startup()
 
-    @property
-    def instance_name(self):
-        return self.name.lower().replace(' ','_')
-
-    def init_client(self,openai_client=None,openai_api_key=None):
+    def init_client(self,openai_api_key=None):
         """
         Initializes the OpenAI client
         """
-        if openai_client:
-            self.client=openai_client
-        elif openai_api_key:
+        if openai_api_key:
             self.client=OpenAI(api_key=openai_api_key)
         elif os.getenv("OPENAI_API_KEY"):
             self.client=OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -743,6 +1027,10 @@ class Pandora:
             return False
         else:
             return True
+
+    @property
+    def instance_name(self):
+        return self.name.lower().replace(' ','_')
 
     def init_folders_and_files(self,work_folder=None):
         """
@@ -769,12 +1057,10 @@ class Pandora:
             with open(startup_file,'w') as f:
                 f.write('')
         self.startup_file=startup_file
-        
+
     def init_console(self,console=None,input_hook=None):
         """
         Initializes the built-in python console used by the AI
-        Properly sets stdout redirection to the collector
-        stdin redirection is handled by the input_hook (optional) 
         """
         def custom_output(buffer):
             message=Message(content=buffer,role='system',name="Interpreter",type="queued",tag="interpreter")
@@ -793,7 +1079,7 @@ class Pandora:
             os.chdir({self.instance_name}.work_folder)
         """))
 
-    def init_tools(self,tools=None,builtin_tools=None):
+    def init_tools(self,tools=None,builtin_tools=None, google_custom_search_api_key=None, google_custom_search_cx=None):
         """
         Initializes the tools used by the AI
         First load custom tools passed to the constructor
@@ -801,94 +1087,12 @@ class Pandora:
         """
         self.tools=tools or {}
         self.load_tools()
-        self.builtin_tools=builtin_tools or ['message','codeblock','observe','return_output','status','memory','generate_image']
-        if 'message' in self.builtin_tools:
-            self.add_tool(
-                name="message",
-                description=r"""message(content,speak=True,language=None) # Main and default tool to communicate a message to the user. Supports Markdown and KaTeX.""",
-                obj=self.add_ai_message,
-                parameters=dict(
-                    content='(string) Should always be a triple quoted raw string. Triple quote marks within the content string must be escaped for code consitency.',
-                    speak='(boolean) Determines if TTS is used to speak out the message',
-                    language='(string) The language setting for TTS. Set it to the appropriate value depending on the content. Default falls back to your global language setting.'
-                ),
-                required=['content'],
-                example="""
-                user:
-                Show me a LaTeX formula please.
-
-                assistant:
-                message(r\"\"\"Sure! Here is the famous Euler formula:
-                \[
-                e^{i\pi}+1=0 
-                \]
-                It connects the most fundamental constants in mathematics: \(0,1,i,\pi,e\).\"\"\")
-                """
-            )
-        else:
-            def message(*args,**kwargs):
-                print("Warning: Messaging the user is not possible in the current setting. Your messages will not be received.")
-                
-            self.console.update_namespace(
-                message=message
-            )
-        
-        if 'codeblock' in self.builtin_tools:
-            self.add_tool(
-                name="codeblock",
-                description="codeblock(code,language) # Main and default tool to show a code snippet to the user.",
-                obj=self.add_ai_codeblock,
-                parameters=dict(
-                    code="(string) The code you want to display. Should always be a triple quoted raw string. Triple quote marks within the code string must be escaped.",
-                    language="(string) The programming language used in the code string (defaults to 'text')"
-                ),
-                required=['code'],
-                example="""
-                user:
-                Show me how to print some text in the console.
-
-                assistant:
-                message(r\"\"\"Sure, here is a code snippet showing how to print a simple 'Hello world!' statement in the console.\"\"\")
-                codeblock(r\"\"\"
-                print('Hello world!')
-                \"\"\",language='python')
-                message(r\"\"\"Here is what the output will look like when we run it:\"\"\")
-                print('Hello world!")
-                """
-            )
-        else:
-            def codeblock(*args,**kwargs):
-                print("Warning: Showing code blocks is not possible in the current setting. Code blocks will not be shown to the user.")
-
-            self.console.update_namespace(
-                codeblock=codeblock
-            )
-
-        if 'status' in self.builtin_tools:
-            self.add_tool(
-                name='status',
-                description="status(status_string) # Shows the user a short status notification while code is running. Used to keep the user informed by notifying your strategy/steps while your scripts are running. Any call to 'status' is always immediately followed by the corresponding code performing the action (in the same script).",
-                obj=self.status,
-                example="""
-                assistant:
-                status("Computing the factorial of 12.")
-                import math
-                math.factorial(12)                
-                """
-            )
-        
-        if 'memory' in self.builtin_tools:
-            self.add_tool(
-                name="memory",
-                description="memory # a custom nested attribute-style access data structure linked to a JSON file for long lasting storage. Supports dump() method to save the content to the file, and dumps() to serialize into a string. Nested keys must all be valid identifiers.",
-                obj=self.memory,
-                type="object"
-            )
+        self.builtin_tools=builtin_tools or ['observe','generate_image','memory','open_in_browser','websearch','get_webdriver']
 
         if 'observe' in self.builtin_tools:
             self.add_tool(
                 name="observe",
-                description="observe(source) # Inject in your context feed informations extracted from any kind of source. examples: observe(math) ; observe('my_script.py') ; observe(os.getcwd()) ; observe('my_image.png') ; observe('my_document.pdf')... The function will do its best to return something informative, even mediocre, whatever the source type. Use it proactively to get contextual awareness of information contained in the source that wouldn't be visible to you otherwise. For token efficiency, observed information won't persist in context more that one turn, so you will have to observe the source again anytime you need visibility on its content.",
+                description="observe(source) # Inject in your context feed informations extracted from any kind of source. The function will do its best to return something informative, whatever the source type. Use it proactively to get contextual awareness of the source content. For token efficiency, observed information won't persist in context more that one turn, so you will have to observe the source again anytime you need visibility on the content.",
                 obj=self.observe,
                 parameters=dict(
                     source="(any) The source to observe. Can be a directory, file, url, module, class, function, variable, image..."
@@ -932,13 +1136,54 @@ class Pandora:
                 return_output(math.factorial(12))
                 """
             )
-                
-    def init_TTS(self,text_to_audio_hook=None,audio_play_hook=None):
+
+        if 'open_in_browser' in self.builtin_tools:
+            import webbrowser
+            self.add_tool(
+                name="open_in_browser",
+                description="open_in_browser(file_or_url) # Default function to show a file or url via the user's default webbrowser.",
+                obj=webbrowser.open
+            )
+
+        if 'memory' in self.builtin_tools:
+            self.add_tool(
+                name="memory",
+                description="memory # a custom nested attribute-style access data structure linked to a JSON file for long lasting storage. Supports dump() method to save the content to the file, and dumps() to serialize into a string. Nested keys must all be valid identifiers.",
+                obj=self.memory,
+                type="object"
+            )
+
+        if 'websearch' in self.builtin_tools:
+            from google_search import init_google_search
+            google_custom_search_api_key=google_custom_search_api_key or os.getenv('GOOGLE_CUSTOM_SEARCH_API_KEY')
+            google_custom_search_cx=google_custom_search_cx or os.getenv('GOOGLE_CUSTOM_SEARCH_CX') 
+            google_search=init_google_search(api_key=google_custom_search_api_key,cse_id=google_custom_search_cx)
+            def websearch(query,num=5,type='web'):
+                self.observe(google_search(query,num,type))
+            
+            self.add_tool(
+                name="websearch",
+                description="websearch(query,num=5,type='web') # Make a google search. type can be either 'web' or 'image'. Results are automatically observed (returns None).",
+                obj=websearch
+            )
+
+        if 'get_webdriver' in self.builtin_tools:
+            from get_webdriver import get_webdriver
+            
+            self.add_tool(
+                name="get_webdriver",
+                description="driver=get_webdriver() # This function returns a ready to use headless firefox selenium webdriver suitable for the current environment.",
+                obj=get_webdriver
+            )
+                 
+    def init_TTS(self,text_to_audio_hook=None,audio_play_hook=None,thread_decorator=None):
         """
         Initializes the TTS hooks used to speak out AI messages. 
         """
-        self.text_to_audio_hook=text_to_audio_hook
-        self.audio_play_hook=audio_play_hook
+        self.text_to_audio_hook=text_to_audio_hook or text_to_audio
+        self.audio_play_hook=audio_play_hook or play_audio
+        self.thread_decorator=thread_decorator or (lambda thread:thread)
+        self.voice_processor=VoiceProcessor(self)
 
     def init_config(self,config=None):
         """
@@ -948,9 +1193,6 @@ class Pandora:
         Then update with config passed in the constructor
         """
         self.config=Pandora.default_config.copy()    
-        
-        file_config=load_json_file(os.path.join(self.config_folder,"config.json"))
-        self.config.update(file_config)
 
         if config:
             self.config.update(config)
@@ -959,24 +1201,12 @@ class Pandora:
         """
         Initializes the preprompts (base_preprompt, preprompt, example).
         First load the default base preprompt.
-        Then update with files in the config folder
         Then update with preprompts passed in the constructor
         """
         #load defaults
         self.base_preprompt=Pandora.base_preprompt
         self.preprompt=''
         self.example=''
-
-        #load from config files
-        file_base_preprompt=load_txt_file(os.path.join(self.config_folder,'base_preprompt.txt'))
-        if file_base_preprompt:
-            self.base_preprompt=file_base_preprompt
-        file_preprompt=load_txt_file(os.path.join(self.config_folder,'preprompt.txt'))
-        if file_preprompt:
-            self.preprompt=file_preprompt
-        file_example=load_txt_file(os.path.join(self.config_folder,'example.txt'))
-        if file_example:
-            self.example=file_example
 
         #load from constructor kwargs
         if base_preprompt:
@@ -988,29 +1218,11 @@ class Pandora:
 
         self.infos=infos or []
 
-    def run_script(self,script):
-        """
-        Run a script file using the agent. 
-        The code will be run and the agent will have the code and execution results in context.
-        Notably useful to run a startup script.
-        """
-        if os.path.isfile(script):
-            with open(script,'r') as f:
-                content=f.read()
-            if content:
-                msg=Message(content=f"Running {script}...",role='system',name='system_bot')
-                self.add_message(msg)
-                code=process_raw_code(content,role='user')
-                code=self.replace(code)
-                msg=Message(content=code,role="system",name='system_bot')       
-                self.add_message(msg)
-                self.console.run(code)
-                if not self.console.error:
-                    msg=Message(content=f"{script} ran successfully.",role='system',name='system_bot')
-                    self.add_message(msg)
-                else:
-                    msg=Message(content=f"{script} ran with errors.",role='system',name='system_bot')
-                    self.add_message(msg)
+    def run_startup(self):
+        if self.startup_file and os.path.isfile(self.startup_file):
+            with open(self.startup_file,'r') as f:
+                code=f.read()
+            self.console.run_silent(code)
 
     def add_message(self,message):
         """
@@ -1018,13 +1230,79 @@ class Pandora:
         """
         self.messages.append(message)
 
+    def add_user_prompt(self,content,tag='user_message'):
+        """
+        Adds a user prompt to the collector.
+        """
+        content=process_markdown(content)
+        message=Message(content,role="user",name=self.config.username,type='prompt',tag=tag)
+        self.collector.collect(message)
+
+    def add_user_codeblock(self,code,language="text"):
+        """
+        Shortcut function to add a user codeblock to the collector.
+        """
+        content=f'```{language}\n{code}\n```'
+        self.add_user_prompt(content)
+
+    def add_image(self,file=None,url=None,bytesio=None):
+        """
+        Adds an image to the AI context for vision analysis (if vision is enabled)
+        """
+        success=False
+        if self.config.vision_enabled and self.config.model=="gpt-4-vision-preview":
+            if(file or url or bytesio):
+                img=Image(
+                    file=file,
+                    url=url,
+                    bytesio=bytesio
+                )
+                self.add_message(img.get_message())
+                self.new_turn=True
+                success=True
+        return success
+        
+    def add_tool(self,name,description,obj,type="function",example=None,parameters=None,required=None,mode="python"):
+        """
+        Adds a new tool to the AI agent (loads it in the namespace along with a description for the AI).
+        name : the name the tool will have in the internal namespace
+        description : basic signature and usage instructions for the AI
+        obj : the python object embodying the usable aspect of the tool (will be injected in the internal namespace under the chosen name)
+        type : type hint of the tool (function, object, module...) to help the AI know what it has to deal with
+        example : an example showing how the tool should be used by the AI
+        parameters : a dict mapping all parameters' names to a short description of each
+        required : a list of all required parameters
+        """
+        parameters=parameters or {}
+        required=required or []
+        tool=Tool(
+            mode=mode,
+            name=name,
+            type=type,
+            description=description,
+            obj=obj,
+            parameters=parameters,
+            required=required,
+            example=example
+        )
+        self.tools[tool.name]=tool
+        if tool.mode=="python":
+            self.console.update_namespace({tool.name:tool.obj})
+
+    def load_tools(self):
+        """
+        Loads all tools in the console's namespace
+        """
+        for tool in self.tools.values():
+            if tool.mode=="python":
+                self.console.update_namespace({tool.name:tool.obj})
+
     def observe(self,source):
         """
         Main tool used by the AI to observe something.
         Supports a wide range of possible sources:
         folders, files, urls, images, python modules/classes/functions/variables
         """
-        self.status("Observing something...")
 
         if isinstance(source, str) and source.startswith(('http://', 'https://')):
             if source.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif')):
@@ -1050,7 +1328,6 @@ class Pandora:
         """
         Shortcut function to make the AI observe an image
         """
-        self.status("Observing image...")
         success=self.add_image(file=file,url=url,bytesio=bytesio)
         if not success:
             print("Impossible to observe image.")
@@ -1059,37 +1336,18 @@ class Pandora:
         """
         Extract textual data from some sources passed as kwargs and inject the data in the AI context as a system message
         """
-        self.status("Observing data...")
         s='#Result of observation:\n'
         for key in kwargs:
             s+=f"{key}:\n"
             s+=get_text(kwargs[key])+'\n'
         message=Message(content=s,role='system',name="Observation",type='temp',tag="observation")
-        self.collector.collect(message)
+        self.add_message(message)
         self.new_turn=True
-            
-    def add_image(self,file=None,url=None,bytesio=None):
-        """
-        Adds an image to the AI context for vision analysis (if vision is enabled)
-        """
-        success=False
-        if self.config.vision and self.config.model=="gpt-4-vision-preview":
-            if(file or url or bytesio):
-                img=Image(
-                    file=file,
-                    url=url,
-                    bytesio=bytesio
-                )
-                self.collector.collect(img.get_message())
-                self.new_turn=True
-                success=True
-        return success
 
     def gen_image(self,description,file_path,model="dall-e-3",size="1024x1024",quality="standard"):
         """
         Generates an image using DALL-E 3
         """
-        self.status("Generating image...")
         try:
             response = self.client.images.generate(
                 model=model,
@@ -1102,15 +1360,10 @@ class Pandora:
             response = requests.get(image_url)
 
             if response.status_code == 200:
-                if not os.path.isdir(os.path.dirname(os.path.abspath(file_path))):
-                    print("Invalid destination directory. Defaulting to work folder for destination.")
-                    file_path=os.path.join(self.work_folder,os.path.basename(file_path))
-
                 with open(file_path, "wb") as file:
                     file.write(response.content)
                 print(f"Image successfully generated: path='{file_path}'")
                 return file_path
-
             else:
                 print("There was a problem while generating the image file. Aborting.")
                 return None
@@ -1118,96 +1371,6 @@ class Pandora:
         except Exception as e:
             print(str(e))
             return None
-        
-    def add_tool(self,name,description,obj,type="function",example=None,parameters=None,required=None):
-        """
-        Adds a new tool to the AI agent (loads it in the namespace along with a description for the AI).
-        name : the name the tool will have in the internal namespace
-        description : basic signature and usage instructions for the AI
-        obj : the python object embodying the usable aspect of the tool (will be injected in the internal namespace under the chosen name)
-        type : type hint of the tool (function, object, module...) to help the AI know what it has to deal with
-        example : an example showing how the tool should be used by the AI
-        parameters : a dict mapping all parameters' names to a short description of each
-        required : a list of all required parameters
-        """
-        parameters=parameters or {}
-        required=required or []
-        tool=Tool(
-            name=name,
-            type=type,
-            description=description,
-            obj=obj,
-            parameters=parameters,
-            required=required,
-            example=example
-        )
-        self.tools[tool.name]=tool
-        self.load_tools()
-
-    def add_ai_message(self,content,language=None,speak=True):
-        """
-        Main function to handle messages sent by the AI.
-        Manages TTS functionalities.
-        Markdown is preprocessed to enhance LaTeX support.
-        Methods for display are dealt with by the collector
-        """
-        
-        def display_part(part):
-            if part.strip():
-                message=Message(part,role="assistant",name=self.name,tag='assistant_message',no_add=True)
-                self.collector.collect(message)
-
-        
-        def speak_part(part,language=None,speak=True):
-            chunks=split_string(part,delimiters=["\n"])
-            for chunk in chunks:
-                if chunk.strip():
-                    if self.text_to_audio_hook and self.audio_play_hook and speak and self.config.voice_mode:
-                        self.status("Preparing audio...")
-                        audio=self.text_to_audio_hook(chunk,language=lang)
-                    display_part(chunk)
-                    if self.text_to_audio_hook and self.audio_play_hook and speak and self.config.voice_mode:
-                        self.status("Speaking...")
-                        self.audio_play_hook(audio)
-        
-        content=process_markdown(content)
-        lang=language or self.config.language
-        patterns={
-            'codeblock':r'```.*?```',
-            'latex':r'\$\$.*?\$\$',
-        }
-        splitted=split(content,patterns)
-        if isinstance(splitted['content'],str):
-            parts=[splitted['content']] 
-        elif isinstance(splitted['content'],list):
-            parts=splitted['content']
-        for part in parts:
-            if part['tag']=='else':
-                speak_part(pack(part),language=lang,speak=speak)
-            else:
-                display_part(pack(part))
-
-    def add_user_prompt(self,content,tag='user_message'):
-        """
-        Adds a user prompt to the collector.
-        """
-        content=process_markdown(content)
-        message=Message(content,role="user",name=self.config.username,type='prompt',tag=tag)
-        self.collector.collect(message)
-
-    def add_ai_codeblock(self,code,language="text"):
-        """
-        Shortcut function to add an AI codeblock to the collector.
-        """
-        code=code.replace('`',"'")
-        self.add_ai_message(f'```{language}\n{code}\n```',speak=False)
-
-    def add_user_codeblock(self,code,language="text"):
-        """
-        Shortcut function to add a user codeblock to the collector.
-        """
-        content=f'```{language}\n{code}\n```'
-        self.add_user_prompt(content)
 
     def inject_kwargs(self,kwargs):
         """
@@ -1218,64 +1381,9 @@ class Pandora:
             self.console.update_namespace(kwargs)
             s="#The following kwargs have been injected in the console's namespace:\n"
             for key in kwargs:
-                s+=f"{key}={repr(kwargs[key])}\n"
+                s+=f"{key}={str(kwargs[key])}\n"
             message=Message(content=s,role='system',name="system_bot",type='prompt')
             self.add_message(message)
-
-    def upload_file(self, file_path=None, bytesio=None, stringio=None):
-        """
-        Uploads a file to the workfolder and notify the AI it happened by giving it the path as a system message.
-        """
-        def get_available_path(name):
-            i = 0
-            parts = name.split('.')
-            ext = parts[-1] if len(parts) > 1 else ''
-            name = '.'.join(parts[:-1]) if len(parts) > 1 else parts[0]
-            new_name = f"{name}.{ext}" if ext else name
-            while os.path.exists(os.path.join(self.work_folder, new_name)):
-                i += 1
-                new_name = f"{name}_{i}.{ext}" if ext else f"{name}_{i}"
-            return os.path.join(self.work_folder, new_name)
-
-        success = False
-        if file_path and os.path.exists(file_path):
-            path = get_available_path(os.path.basename(file_path))
-            with open(file_path, 'rb') as f:
-                with open(path, 'wb') as g:
-                    g.write(f.read())
-            success = True
-        elif bytesio:
-            bytesio.seek(0)  # Rewind to the start of the BytesIO object
-            path = get_available_path(bytesio.name)
-            with open(path, 'wb') as g:
-                g.write(bytesio.read())
-            success = True
-        elif stringio:
-            stringio.seek(0)  # Rewind to the start of the StringIO object
-            path = get_available_path(stringio.name)
-            with open(path, 'w') as g:
-                g.write(stringio.read())
-            success = True
-        if success:
-            s = "#The following file has been uploaded in your workfolder:\n"
-            s += path
-            message = Message(content=s, role='system', name="system_bot",type='prompt')
-            self.add_message(message)
-
-    def get_tools(self):
-        """
-        Returns the description of all tools as a system message.
-        """
-        if self.tools:
-            s="#TOOLS:\n"
-            s+="The following tools are already declared in the console namespace and ready to be used in your scripts. Below is a description of each.\n"
-            for tool in self.tools:
-                s+=self.tools[tool].get_description()+'\n'
-            s+="#END OF TOOLS"
-            message=Message(content=s,role="system",name="system_bot")
-            return [message]
-        else:
-            return []
 
     def get_preprompt(self):
         """
@@ -1297,6 +1405,22 @@ class Pandora:
         if preprompt:
             preprompt=Message(content=format(preprompt,locals()),role="system",name="system_bot")
             return [preprompt]
+        else:
+            return []
+
+    def get_tools(self):
+        """
+        Returns the description of all tools as a system message.
+        """
+        tools={name:tool for name,tool in self.tools.items() if tool.mode=='python'}
+        if tools:
+            s="#TOOLS:\n"
+            s+="The following tools are already declared in the console namespace and ready to be used in your python scripts. Below is a description of each.\n"
+            for tool in tools.values():
+                s+=tool.get_description()+'\n'
+            s+="#END OF TOOLS"
+            message=Message(content=s,role="system",name="system_bot")
+            return [message]
         else:
             return []
 
@@ -1419,13 +1543,13 @@ class Pandora:
         prompts=self.get_prompts()
         preprompt=self.get_preprompt()
         example=self.get_example()
-        tools=self.get_tools()
-        info=self.get_infos()
         memory=self.get_memory()
+        info=self.get_infos()
         temp=self.get_temp()
-        count=total_tokens(preprompt+tools+info+memory+example+temp+prompts)
+        tools=self.get_tools()
+        count=total_tokens(preprompt+tools+info+example+memory+temp+prompts)
         queued=self.get_queued(count)
-        context=preprompt+tools+info+memory+example+Sort(queued+temp+prompts)
+        context=preprompt+tools+info+example+memory+Sort(queued+temp+prompts)
         self.send_prompts_to_queue()
         return context
 
@@ -1433,39 +1557,68 @@ class Pandora:
         """
         Converts a list of messages (objdict instances) to a list of dicts accepted by the OpenAI API.
         """
-        prepared=[]
-        for message in messages:
-            prep={'content':message.content,'role':message.role,'name':message.name}
-            if message.get('tool_call_id'):
-                prep['tool_call_id']=message.tool_call_id
-            if message.get('tool_calls'):
-                prep['tool_calls']=message.tool_calls
-            prepared.append(prep)
-        return prepared
+        return [dict(content=msg.content,role=msg.role,name=msg.name) for msg in messages]
 
-    def call_OpenAI_API(self,context):
+    def completion_func(self):
+        
+        context=self.gen_context()
+
+        kwargs=dict(
+            model=self.config.model,
+            messages=self.prepare_messages(context),
+            max_tokens=self.config.max_tokens,
+            temperature=self.config.temperature,
+            top_p=self.config.top_p
+        )
+
+        stream=self.client.chat.completions.create(
+            stream=True,
+            **kwargs
+        )
+
+        for chunk in stream:
+            if (token:=chunk.choices[0].delta.content) is not None:
+                self.token_queue.put(token)
+                time.sleep(0.005)
+        self.token_queue.put('\n')
+        self.token_queue.put("#END#")
+
+    def stream_generator(self):
+        self.token_queue=Queue()
+        self.gen_thread=Thread(target=self.completion_func)
+        self.gen_thread.start()
+        def reader():
+            tokens=[]
+            while not (token:=self.token_queue.get())=="#END#":
+                tokens.append(token)
+                yield token
+            content=''.join(tokens)
+            msg=Message(content=content,role="assistant",name=self.name)
+            self.add_message(msg)
+            self.response=content
+        return reader()
+
+    def gen_response(self):
         """
         Takes a context and calls the OpenAI API for a response.
         Configuration of the model is taken from self.config.
         Messages in context are prepared (convered to suitable dicts) before being passed to the API.
         """
-        kwargs=objdict(
+        context=self.gen_context()
+
+        kwargs=dict(
             model=self.config.model,
             messages=self.prepare_messages(context),
             max_tokens=self.config.max_tokens,
             temperature=self.config.temperature,
-            top_p=self.config.top_p,
-            n=self.config.n,
-            stop=self.config.stop,
-            presence_penalty=self.config.presence_penalty,
-            frequency_penalty=self.config.frequency_penalty
+            top_p=self.config.top_p
         )
 
         success=False
         err=0
         while not success and err<2:
             try:
-                answer = self.client.chat.completions.create(**kwargs.to_dict())
+                answer = self.client.chat.completions.create(**kwargs)
             except Exception as e:
                 print(str(e))
                 err+=1
@@ -1473,87 +1626,55 @@ class Pandora:
             else:
                 success=True
         if not success:
-            response=objdict(content="I'm sorry but there was a recurring error with the OpenAI server. Would you like me to try again?",role="assistant",name=self.name)
+            content="I'm sorry but there was a recurring error with the OpenAI server. Would you like me to try again?"
         else:
-            response=answer.choices[0].message
-        return response
+            content=answer.choices[0].message.content
 
-    def gen_response(self):
-        """
-        Generates the context and pass it to the AI for a response
-        Returns the response.
-        """
-        context=self.gen_context()      
-        response=self.call_OpenAI_API(context)
-        return response    
-
-    def load_tools(self):
-        """
-        Loads all tools in the console's namespace
-        """
-        for tool in self.tools:
-            self.console.update_namespace({self.tools[tool].name:self.tools[tool].obj})
-
-    def process_ai_response(self,response):
-        """
-        Processes the AI response by making sure it is fully python-executable.
-        Make some custom syntax replacements.
-        Adds the processed code as a message to the collector.
-        Runs the code.
-        Determines if a new turn should be taken (error or results in stdout)
-        Process all messages created by code execution remaining in the collector 
-        """
-        content=response.content
-        if content:
-            code=process_raw_code(content,role='assistant')
-            code=self.replace(code)
-            message=Message(content=code,role="assistant",name=self.name,type="queued",tag="assistant_code")       
-            self.collector.collect(message)
-            self.console.run(code)
-            if self.console.error or self.console.get_result():
-                self.new_turn=True
-            self.collector.process_all()
+        msg=Message(content=content,role="assistant",name=self.name)
+        self.add_message(msg)
+        self.response=content
+        return content
 
     def process(self):
-        """
-        Core method for the AI internal process.
-        Initializes the new_turn flag to False.
-        Process the newly collected messages by sending them to the AI (to form the full context).
-        Generates a reponse from the AI.
-        Processes and runs the AI python code response
-        If the new_turn flag has been set to True for some reason in the meanwhile, take another turn.
-        """
-
-        self.new_turn=False               
         
+        self.new_turn=False
+
         self.collector.process_all()
 
+        processing_funcs=[
+                lambda chunk:chunk.replace("```run_python","```python"),
+                lambda chunk:chunk.replace(r"\(","$"),
+                lambda chunk:chunk.replace(r"\)","$"),
+                lambda chunk:chunk.replace(r"\[","$$"),
+                lambda chunk:chunk.replace(r"\]","$$")
+            ]
+        
         self.status("Generating response.")
-        response=self.gen_response() 
 
-        self.status("Running code.")
-        self.process_ai_response(response)
+        if self.config.stream:
+            processor=TokenProcessor(size=5,processing_funcs=processing_funcs)
+            content=self.voice_processor.speak(processor(self.stream_generator()))
+        else:
+            processor=Processor(processing_funcs=processing_funcs)
+            content=processor(self.gen_response())
+        
+        msg=Message(content=content,role="assistant",name=self.name,type="queued",tag="assistant_message",no_add=True)
+        self.collector.collect(msg)
 
+        code_parts=extract_python(self.response)
+        
+        if code_parts:
+            self.status("Running code.")
+
+        for code in code_parts:
+            self.console.run(self.replace(code.strip()))
+            if self.console.get_result():
+                self.new_turn=True
+        
         self.status("#DONE#")
 
         if self.new_turn:
             self.process()
-
-    def replace(self,code):
-        """
-        Utility function to replace some elements of syntax into others in a code snippet.
-        Useful to avoid AI or the user make common syntax mistakes or misuse some tools.
-        Desired replacements can be customized in self.config.code_replacements.
-        """
-        code=code.replace("message(\"","message(r\"").replace("message('","message(r'")
-        code=code.replace("codeblock(\"","codeblock(r\"").replace("codeblock('","codeblock(r'")
-        code=code.replace("code=\"","code=r\"").replace("code='","code=r'")
-        if self.config.get('code_replacements'):
-            for segment, replacement in self.config.code_replacements:
-                code=code.replace(segment,replacement)
-            return code.strip()
-        else: 
-            return code                                  
 
     def process_user_input(self,prompt):
         """
@@ -1581,6 +1702,19 @@ class Pandora:
                     self.console.run(content)
 
             self.collector.process_all()
+
+    def replace(self,code):
+        """
+        Utility function to replace some elements of syntax into others in a code snippet.
+        Useful to avoid AI or the user make common syntax mistakes or misuse some tools.
+        Desired replacements can be customized in self.config.code_replacements.
+        """
+        if self.config.get('code_replacements'):
+            for segment, replacement in self.config.code_replacements:
+                code=code.replace(segment,replacement)
+            return code.strip()
+        else: 
+            return code                                    
             
     def __call__(self,prompt="",**kwargs):
         """
@@ -1610,12 +1744,53 @@ class Pandora:
         Useful to implement magic function behavior.
         """
         self.output=data
+        return f"Successfully transmitted data={repr(data)}"
 
     def clear_message_history(self):
         """
         Clears the message history of the agent.
         """
         self.messages=[]   
+
+    def upload_file(self, file_path=None, bytesio=None, stringio=None):
+        """
+        Uploads a file to the workfolder and notify the AI it happened by giving it the path as a system message.
+        """
+        def get_available_path(name):
+            i = 0
+            parts = name.split('.')
+            ext = parts[-1] if len(parts) > 1 else ''
+            name = '.'.join(parts[:-1]) if len(parts) > 1 else parts[0]
+            new_name = f"{name}.{ext}" if ext else name
+            while os.path.exists(os.path.join(self.work_folder, new_name)):
+                i += 1
+                new_name = f"{name}_{i}.{ext}" if ext else f"{name}_{i}"
+            return os.path.join(self.work_folder, new_name)
+
+        success = False
+        if file_path and os.path.exists(file_path):
+            path = get_available_path(os.path.basename(file_path))
+            with open(file_path, 'rb') as f:
+                with open(path, 'wb') as g:
+                    g.write(f.read())
+            success = True
+        elif bytesio:
+            bytesio.seek(0)  # Rewind to the start of the BytesIO object
+            path = get_available_path(bytesio.name)
+            with open(path, 'wb') as g:
+                g.write(bytesio.read())
+            success = True
+        elif stringio:
+            stringio.seek(0)  # Rewind to the start of the StringIO object
+            path = get_available_path(stringio.name)
+            with open(path, 'w') as g:
+                g.write(stringio.read())
+            success = True
+        if success:
+            s = "#The following file has been uploaded in your workfolder:\n"
+            s += path
+            message = Message(content=s, role='system', name="system_bot",type='prompt')
+            self.add_message(message)
 
     def proceed(self):
         """
@@ -1635,82 +1810,6 @@ class Pandora:
         """
         message=Message(content=status,role='assistant',name=self.name,type='status',tag='status')
         self.collector.collect(message)
-
-    def new_agent(self,name,**kwargs):
-        """
-        Creates a new instance of AI agent whose outputs are routed to the main agent's stdout
-        kwargs are any parameters supported by the Pandora constructor (except for display_hook and context_handler).
-        All kwargs are optional except the name parameter.
-        Agents have their own internal python interpreter with a separate namespace independant from the main agent's.
-        They can be customized to handle a different set of tools, or be instructed with a different preprompt to refine their behavior. 
-        """
-        def custom_print(buffer):
-            message=Message(content=buffer,role='system',name="Interpreter",type="queued",tag="interpreter")
-            self.collector.collect(message)
-
-        class AgentContext:
-            def __init__(self,message):
-                if message.tag in ['assistant_message','interpreter']:
-                    custom_print(message.name+':\n')
-            def __enter__(self,*args,**kwargs):
-                pass
-            def __exit__(self,*args,**kwargs):
-                pass
-        
-        preprompt=f"""
-        In the current setting, you've been instantiated as a sub-agent of a main agent called {self.name}.
-        Your message outputs are directed in the main agent's standard output and will be visible to both the main agent and the user.
-        You're task is to assist in performing specific tasks required by the main agent or the user.
-        """
-
-        if not kwargs.get(preprompt):
-            kwargs['preprompt']=preprompt
-
-        def agent_display(message,status):
-            if message.tag in ['interpreter']:
-                custom_print(message.content)
-            elif message.tag in ['assistant_message']:
-                custom_print(message.content+'\n')
-            elif message.tag in ['status'] and not message.content=='#DONE#':
-                custom_print(message.content+'\n')
-        agent=Pandora(name=name,work_folder=os.path.join(self.work_folder,name),openai_client=self.client,display_hook=agent_display,context_handler=lambda msg:AgentContext(msg),**kwargs)
-        return agent
-    
-    def magic_function(self,verbose=False):
-        """
-        Returns an AI function that can be called with a natural language query and some kwargs like so:
-        result=func("return the sum of a and b.",a=2,b=3)
-        result # output: 5
-        Can return any type of python object, as long as the AI manages to perform the task with the python modules at its disposal.
-        --------
-        verbose: (boolean) determines whether the inner workings of the func are printed in the console
-        """
-        def custom_print(buffer):
-            message=Message(content=buffer,role='system',name="Interpreter",type="queued",tag="interpreter")
-            self.collector.collect(message)
-
-        def display(message,status):
-            if verbose:
-                if message.tag in ['interpreter','assistant_message','assistant_code']:
-                    custom_print(message.content)
-                elif message.tag in ['status'] and not message.content=='#DONE#':
-                    custom_print(message.content+'\n')
-        
-        builtin_tools=['return_output']
-        agent=Pandora(openai_client=self.client,builtin_tools=builtin_tools,display_hook=display,context_handler=lambda msg:NoContext(msg))
-        agent.config.name="MagicFunction"
-        agent.preprompt="""
-        Assignement:
-        You behave as an intelligent python function.
-        The user will ask you to perform a task and may pass you specific kwargs.
-        You generate a python script that performs the task and finish it by returning the result via the return_output function.
-        The user will receive this value as the output of the call.
-        The code must be left out of markdown code blocks to be executed (never use markdown code blocks in your scripts).
-        You're not supposed to attempt to communicate with the user in any way, except by returning relevant data via the return_output function.
-        Variables/objects/functions you declared in previous runs are reusable in subsequent calls, take advantage of it to make your scripts more efficient.
-        """
-        agent.config.uses_past=True
-        return agent
 
     def completion(self,prompt,context=None,**kwargs):
         """
@@ -1733,12 +1832,7 @@ class Pandora:
             top_p=1,
             temperature=1,
             max_tokens=1000,
-            n=1,
             stream=False,
-            stop=["system:"],
-            presence_penalty=0,
-            frequency_penalty=0,
-            logit_bias=None
         )
 
         config.update(kwargs)
@@ -1749,7 +1843,7 @@ class Pandora:
             )
         return response.choices[0].message.content.strip()
         
-    def interact(self,custom_input=None):
+    def interact(self):
         """
         Implements a simple interaction loop with the agent.
         Useful to test the agent in the terminal without code overhead:
@@ -1761,7 +1855,7 @@ class Pandora:
         agent.interact() # enters the interaction loop in the terminal (type exit() or quit() to end the loop)
         """
 
-        def default_custom_input():
+        def custom_input():
             prompt=''
             flag=False
             while True:
@@ -1777,7 +1871,6 @@ class Pandora:
                     break
             return prompt
         
-        custom_input=custom_input or default_custom_input
         self.loop_flag=True
 
         def custom_exit():
@@ -1789,7 +1882,9 @@ class Pandora:
         )
 
         print("Pandora AI - Interactive session")
-        print("Enter your python commands or talk with Pandora in natural language. End your input scripts with '//'.")
+        print("Enter your python commands or chat with Pandora in natural language.")
+        print("Multi-line input is supported. End your input script with '//' before pressing [Enter] to submit.")
+        print("Run exit() or quit() to exit this interactive session.")
         print('Get some help at any time by simply asking the AI.')
 
         while self.loop_flag:
@@ -1797,3 +1892,59 @@ class Pandora:
             self(prompt)
 
         print("Exiting interactive session. See you next time!")
+
+class AIFunction(Pandora):
+
+    def __init__(self,verbose=False):
+        builtin_tools=['return_output']
+        self.verbose=verbose
+        base_preprompt="""
+        #INSTRUCTIONS
+        You're an advanced AI-powered python function resulting of the combination of the latest OpenAI model and a built-in Python interpreter.
+        As an AI model, you've been especialy trained to use the Python interpreter as your primary means of action. 
+        Your responses are parsed and all parts matching the regex pattern r'```run_python(.*?)```' will be executed directly in your internal interpreter.
+        The user can use you as a python function like so:
+        data=ai_function(query,**kwargs)
+        Upon receiving the query and kwargs, you design a python script meant to satisfy the user's demand, generaly consisting in producing a data output.
+        You're provided with a special 'return_output' tool that you must use to send the produced data out to the user as a response.
+        YOU MUST USE THIS TOOL AND NO OTHER TO SEND THE RETURNED DATA OUT TO THE USER.
+        In case your script results in an exception, you'll be given another turn to self-correct based on the interpreter's feedback, until the 'return_output' call is finally successful.
+        You're not expected to talk to the user, only to do your job sending data out as a python function would.
+        
+        Examples:
+
+        user:
+        Return the factorial of 12.
+
+        assistant:
+        ```run_python
+        import math
+        return_output(math.factorial(12))
+        ```
+
+        user:
+        Return a function that doubles every element of its input list and returns it.
+
+        assistant:
+        ```run_python
+        def double_list_elements(input_list):
+            input_list=[2*e for e in input_list]
+            return input_list
+        
+        return_output(double_list_elements)
+        ```
+
+        #END OF INSTRUCTIONS
+        """
+        def display(content,tag,status):
+            if self.verbose:
+                if tag in ['interpreter','assistant_message']:
+                    stdout_write(content)
+        
+        context_handler=None if self.verbose else lambda message: NoContext()
+        Pandora.__init__(self,base_preprompt=base_preprompt,builtin_tools=builtin_tools,display_hook=display,context_handler=context_handler)
+        self.config.update(
+            model="gpt-3.5-turbo",
+            temperature=0.6
+        )
+        
