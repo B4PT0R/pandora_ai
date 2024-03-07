@@ -19,8 +19,12 @@ Powerful set of builtin tools to:
 - notify status, 
 - generate images via DALL-E 3,
 - persistent memory storage via an external json file.
-Also usable as an 'intelligent' python function capable of generating scripts autonomously and returning any kind of processed data or python object according to a query in natural language along with some kwargs passed in the call.
-Can use the full range of common python packages in its scripts (provided they are installed and well known to the AI)
+
+The AIFunction class implements an 'intelligent' python function capable of generating and running scripts autonomously to return any kind of processed data or python object in response to a query in natural language and some kwargs passed in the call.
+Like so:
+func=AIFunction()
+result=func("Return a function that takes a number and returns the n-th power of that number.",n=3)
+print(result(2)) # output: 8
 
 --------------------------------------------------------------------
 """
@@ -446,7 +450,9 @@ class NoContext:
 class OutputCollector:
 
     """
-    Class handling the routing of messages sent by the user or agent to custom display and context manager methods. 
+    Class handling the routing of messages sent by the user or agent to custom display and context manager methods.
+    Just call the collect(message) method, and it will deal with displaying the content.
+    Supports string or generator message content (in stream mode). 
     By default, all goes to stdout. But can be passed a display_hook and context_handler to customize the routing.
     """
 
@@ -524,8 +530,6 @@ class OutputCollector:
                 self.display(display_chunk,tag,self.status)
         message.content=content
 
-
-        
     def process_all(self):
         while self.messages:
             message=self.messages.pop(0)
@@ -533,6 +537,10 @@ class OutputCollector:
                 self.agent.add_message(message)
 
 class TokenProcessor:
+    """
+    Class used to apply a post-processing on the AI response.
+    Designed to work either on string or generator (streamed) responses.
+    """
 
     def __init__(self,size,processing_funcs=None):
         self.size=size
@@ -564,7 +572,9 @@ class TokenProcessor:
             return self.process(content)
 
 class StreamSplitter:
-    
+    """
+    Class used to duplicate a stream 
+    """
     def __init__(self,generator,n):
         self.generator=generator
         self.queues=None
@@ -590,7 +600,14 @@ class StreamSplitter:
         return reader()
 
 class VoiceProcessor:
-
+    """
+    Class handling TTS.
+    Uses the speak method as entry point.
+    Takes a string or stream as input.
+    Speaks the content as it goes.
+    Returns a token stream synchronized with speech.
+    The thread_decorator is meant for Streamlit compatibility (to decorate Threads with add_script_run_ctx).
+    """
     def __init__(self,agent):
         self.agent=agent
         self.line_queue=Queue()
@@ -700,10 +717,7 @@ class VoiceProcessor:
             return reader()
         else:
             return content
-        
-
-        
-       
+            
 class Image:
 
     """
@@ -861,9 +875,23 @@ def Sort(messages):
 
 class Pandora:
     """
-    Class implementing a regular OpenAI AI agent.
+    Class implementing a custom AI-powered python console using OpenAI GPT4 model.
+    Usable both as a regular python console and/or an AI assistant.
+    Capable of generating and running scripts autonomously in its own internal interpreter.
+    Can be interacted with using a mix of natural language (markdown and LaTeX support) and python code. 
+    Having the whole session in context. Including user prompts/commands, stdout outputs, etc... (up to 128k tokens)
     Highly customizable input/output redirection and display (including hooks for TTS) for an easy and user friendly integration in any kind of application. 
-    Modular usage of custom function tools provided their usage is precisely described to the AI.
+    Modular usage of custom tools provided their usage is precisely described to the AI (including custom modules, classes, functions, APIs).
+    Powerful set of builtin tools to:
+    - facilitate communication with the user, 
+    - enable AI access to data/file content or module/class/function documentation/inspection,
+    - files management (custom work and config folder, folder visibility, file upload/download features)
+    - access to external data (websearch tool, webpage reading), 
+    - notify status, 
+    - generate images via DALL-E 3,
+    - persistent memory storage via an external json file.
+    Also usable as an 'intelligent' python function capable of generating scripts autonomously and returning any kind of processed data or python object according to a query in natural language along with some kwargs passed in the call.
+    Can use the full range of common python packages in its scripts (provided they are installed and well known to the AI)
     """
 
     @staticmethod
@@ -916,69 +944,37 @@ class Pandora:
     base_preprompt="""
         #INSTRUCTIONS
         You're <<self.name>>, an advanced AI-powered python console resulting of the combination of the latest OpenAI model and a built-in Python interpreter.
-        The user can use you as a regular python console in which he can execute code directly.
-        He may as well interact with you in many languages or pass you files/images that you may analyze using your multimodal abilities.
-        As an AI model, you've been especialy trained to use the Python interpreter as your primary means action. 
+        The user can use you as a regular python console in which he can run scripts, interact with you in many languages, or pass you files/images that you may analyze using your multimodal abilities.
+        As an AI model, you've been trained to use the Python interpreter as your primary means of action. 
         Your responses are parsed and all parts matching the regex pattern r'```run_python(.*?)```' will be both shown as code snippet to the user, and executed directly in your interpreter.
         The other parts of your response will be displayed as markdown chat messages (KaTeX is supported).
-        Notably, parts matching r'```python(.*?)```' will only be shown as code snippets but won't be executed. 
-        You can mix executed scripts and markdown messages in a same response. The parser will handle everything sequentially.
-        This setting allows to convienently explain what you're doing as you're doing it.
+        Notably, parts matching r'```python(.*?)```' will be shown as code snippets but won't be executed.  
 
-        Simple rule put shortly : If a task requires you to run code, just run the code, now!
-        Any action you announce should be executed in the same response in which you announced it. 
+        On top of popular python libraries that you may import in your scripts, some specific tools are predeclared in your interpreter's namespace to help you deal with specific tasks.
+        These tools and how you should use them in your scripts will be detailed in the 'TOOLS' section below.
 
+        Important note: You should always attempt to run computations first. Only then will you be able to craft an informed response to the user.
+
+        Don't make up answers, use your vast knowledge in combination with a smart use of available tools to craft informed responses.
         Use the interpreter's feedback to inform your next steps or self-correct coding mistakes autonomously.
-        The code is run on the user's local system and can therefore use any library installed on the user's computer (most common libraries are installed and can be imported). 
         In case you run into unexpected execution issues or don't what/how to do, default back to asking the user for guidance.
 
-        Some specific tools are predeclared in your interpreter's namespace to help you deal with specific tasks.
-        All these tools and how you should use them in your scripts will be detailed in the 'TOOLS' section below.
+        Over-simplified example of expected behaviour:
 
-        Example behavior:
+        User:
+        What is the factorial of 12?
 
-        user:
-        Plot a sine function please. Explain the steps so that I understand how it's done.
-
-        assistant:
-        Sure, let's plot a sine function. 
-        We'll use matplotlib for plotting the graph and numpy for numerical computations.
-        
-        First let's import the required libraries:
+        Assistant:
         ```run_python
-        import matplotlib.pyplot as plt
-        import numpy as np
+        import math
+        math.factorial(12)
         ```
-
-        Then let's create an array of x values from $0$ to $2\pi$ and calculate the sine of x using numpy.
-        ```run_python
-        # Generate an array of x values from 0 to 2*pi
-        x = np.linspace(0, 2 * np.pi, 100)
-        # Calculate the sine of x
-        y = np.sin(x)
-        ```
-
-        Plotting the curve is straightforward with pyplot:
-        ```run_python
-        # Plot the sine curve
-        plt.plot(x, y)
-        # Add some labels and title 
-        plt.xlabel('x values from 0 to 2π')
-        plt.ylabel('sin(x)')
-        plt.title('Plot of the sine function')
-        # Show the plot on screen
-        plt.show()
-        ```
-        Now we'll let these scripts execute to see the result.
 
         Interpreter:
-        [<matplotlib.lines.Line2D object at 0x7f61715d8280>]
-        Text(0.5, 0, 'x values from 0 to 2π')
-        Text(0, 0.5, 'sin(x)')
-        Text(0.5, 1.0, 'Plot of the sine function')
+        479001600
 
-        assitant:
-        You should now be able to see the plot. If you need more explanations, feel free to ask!
+        Assistant:
+        The factorial of 12 is 479001600.
 
         #END OF INSTRUCTIONS
         """
@@ -1565,7 +1561,7 @@ class Pandora:
         """
         return [dict(content=msg.content,role=msg.role,name=msg.name) for msg in messages]
 
-    def completion_func(self):
+    def streamed_completion(self):
         
         context=self.gen_context()
 
@@ -1574,24 +1570,37 @@ class Pandora:
             messages=self.prepare_messages(context),
             max_tokens=self.config.max_tokens,
             temperature=self.config.temperature,
-            top_p=self.config.top_p
+            top_p=self.config.top_p,
+            stream=True
         )
 
-        stream=self.client.chat.completions.create(
-            stream=True,
-            **kwargs
-        )
+        success=False
+        err=0
+        while not success and err<2:
+            try:
+                response = self.client.chat.completions.create(**kwargs)
+            except Exception as e:
+                print(str(e))
+                err+=1
+                time.sleep(0.5)
+            else:
+                success=True
 
-        for chunk in stream:
-            if (token:=chunk.choices[0].delta.content) is not None:
+        if success:
+            for chunk in response:
+                if (token:=chunk.choices[0].delta.content) is not None:
+                    self.token_queue.put(token)
+                    time.sleep(0.005)
+        else:
+            for token in tokenize("I'm sorry but there was a recurring error with the OpenAI server. Would you like me to try again?"):
                 self.token_queue.put(token)
                 time.sleep(0.005)
         self.token_queue.put('\n')
-        self.token_queue.put("#END#")
-
+        self.token_queue.put("#END#")   
+        
     def stream_generator(self):
         self.token_queue=Queue()
-        self.gen_thread=Thread(target=self.completion_func)
+        self.gen_thread=Thread(target=self.streamed_completion)
         self.gen_thread.start()
         def reader():
             tokens=[]
@@ -1604,7 +1613,7 @@ class Pandora:
             self.response=content
         return reader()
 
-    def gen_response(self):
+    def standard_completion(self):
         """
         Takes a context and calls the OpenAI API for a response.
         Configuration of the model is taken from self.config.
@@ -1645,7 +1654,7 @@ class Pandora:
         if self.config.stream:
             return self.stream_generator()
         else:
-            return self.gen_response()
+            return self.standard_completion()
 
     def process(self):
         
