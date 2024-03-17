@@ -79,12 +79,12 @@ def split_text(text, max_tokens):
 
 class Retriever:
 
-    def __init__(self,chunk_size=100,dimensions=250,folder="./documents"):
+    def __init__(self,openai_api_key=None,chunk_size=100,dimensions=128,folder="./documents"):
         self.store={}
         self.chunk_size=chunk_size
         self.dimensions=dimensions
         self.folder=folder
-        self.client=OpenAI(timeout=3)
+        self.client=OpenAI(api_key=openai_api_key or os.getenv('OPENAI_API_KEY'),timeout=3)
         if not os.path.exists(self.folder):
             os.makedirs(self.folder)
 
