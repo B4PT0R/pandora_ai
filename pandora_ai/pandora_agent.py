@@ -49,6 +49,7 @@ import time
 from datetime import datetime
 from objdict_bf import objdict
 from console import Console
+from retriever import Retriever
 from get_text import get_text
 import base64
 import requests
@@ -997,6 +998,7 @@ class Pandora:
                 lambda chunk:chunk.replace(r"\]","$$")
             ]
         self.token_processor=TokenProcessor(size=5,processing_funcs=processing_funcs)
+        self.retriever=Retriever(folder=os.path.join(self.workfolder,"documents"))
         self.init_console(console=console,input_hook=input_hook)
         self.init_TTS(text_to_audio_hook=text_to_audio_hook,audio_play_hook=audio_play_hook,thread_decorator=thread_decorator)
         self.init_tools(tools=tools,builtin_tools=builtin_tools,google_custom_search_api_key=google_custom_search_api_key,google_custom_search_cx=google_custom_search_cx)
@@ -1091,7 +1093,7 @@ class Pandora:
         """
         self.tools=tools or {}
         self.load_tools()
-        self.builtin_tools=builtin_tools or ['observe','generate_image','memory','open_in_browser','websearch','get_webdriver']
+        self.builtin_tools=builtin_tools or ['observe','generate_image','memory','open_in_browser','websearch','get_webdriver','retriever']
 
         if 'observe' in self.builtin_tools:
             self.add_tool(
@@ -1124,6 +1126,22 @@ class Pandora:
                     file_path="(string) The chosen path of the output file (with .png extension)."
                 ),
                 required=["description","file_path"]
+            )
+
+        if 'retriever' in self.builtin_tools:
+            self.add_tool(
+                name='retriever',
+                obj=self.retriever,
+                type='object',
+                descritpion="""
+                retriever # A document store used to implement your chunk-retrieval mechanism. Retrieval is automatic according to semantic relevance of loaded document chunks with respect to the current context.
+                # Methods:
+                retriever.get_titles() # returns the list of titles of documents saved as files in the document store (can be loaded in memory).
+                retriever.get_loaded() # returns the list of titles of documents currently loaded in memory and active for chunk retrieval.
+                retriever.new_document(title,text,description) # Create a new stored document from a givent text content (chunked, embedded, saved and loaded for semantic search).
+                retriever.load_docuemnt(title) # Loads a document in memory.
+                retriever.close_document(title) # unloads a document from memory.
+                """
             )
 
         if 'return_output' in self.builtin_tools:
@@ -1744,6 +1762,11 @@ class Pandora:
         self.process_user_input(prompt)
         if self.get_prompts() and self.config.enabled:
             if self.authenticated:
+                if self.retriever.get_loaded():
+                    results=self.retriever.search(query='\n'.join(prompt.content for prompt in self.get_prompts()),num=5)
+                    if results:
+                        msg=Message(content=str(results),role="system",name="Retriever",type="temp")
+                        self.add_message(msg)
                 self.process()
             elif not self.warning:
                 self.warning=True
