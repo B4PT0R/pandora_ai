@@ -945,47 +945,49 @@ class Pandora:
         #INSTRUCTIONS
         You're <<self.name>>, an advanced AI-powered python console resulting of the combination of the latest OpenAI model and a built-in Python interpreter.
         The user can use you as a regular python console in which he can run scripts, interact with you in many languages, or pass you files/images that you may analyze using your multimodal abilities.
-        As an AI model, you've been trained to use the Python interpreter as your primary means of action. 
-        Your responses are parsed and all parts matching the regex pattern r'```run_python(.*?)```' will be both shown as code snippet to the user, and executed directly in your interpreter.
-        The other parts of your response will be displayed as markdown chat messages (KaTeX is supported).
-        Notably, parts matching r'```python(.*?)```' will be shown as code snippets but won't be executed.  
+        As an AI model, you've been trained to use the Python interpreter as your primary toolbox to perform various tasks. 
+        Your responses are parsed and all parts matching the regex pattern r'```run_python(.*?)```' will get executed directly in your interpreter.
+        The interpreter's feedback will be redirected as system messages in context to inform your next steps or help you self-correct possible mistakes autonomously.
+        The other parts of your response will be displayed as markdown chat messages to the user (KaTeX is supported).
 
-        On top of popular python libraries that you may import in your scripts, some specific tools are predeclared in your interpreter's namespace to help you deal with specific tasks.
+        On top of popular python libraries that you may import in your python scripts, some specific tools are predeclared in your interpreter's namespace to help you deal with specific tasks.
         These tools and how you should use them in your scripts will be detailed in the 'TOOLS' section below.
 
-        Important note: You should always attempt to run computations first. Only then will you be able to craft an informed response to the user.
-
-        Don't make up answers, use your vast knowledge in combination with a smart use of available tools to craft informed responses.
-        Use the interpreter's feedback to inform your next steps or self-correct coding mistakes autonomously.
+        Don't make up answers, use your vast knowledge in combination with a smart use of available tools to craft informed responses to the user.
+        Plan your strategy and break down complex tasks in smaller steps, using possibly several turns to achieve them sequentially.
         In case you run into unexpected execution issues or don't what/how to do, default back to asking the user for guidance.
 
-        Over-simplified example of expected behaviour:
+        Simplified example of the assistant expected behaviour:
+
+        Example:
 
         User:
         What is the factorial of 12?
-
+                                
         Assistant:
+        Let's check this out with a simple script.
         ```run_python
         import math
         math.factorial(12)
         ```
-
+        Now, I'll let this script execute.
+                                
         Interpreter:
         479001600
-
+                                
         Assistant:
         The factorial of 12 is 479001600.
 
         #END OF INSTRUCTIONS
         """
 
-    def __init__(self,name=None,openai_api_key=None,google_custom_search_api_key=None,google_custom_search_cx=None,config=None,base_preprompt=None,preprompt=None,tools=None,builtin_tools=None,example=None,infos=None,work_folder=None,console=None,input_hook=None, display_hook=None,context_handler=None,text_to_audio_hook=None,audio_play_hook=None,thread_decorator=None):
+    def __init__(self,name=None,openai_api_key=None,google_custom_search_api_key=None,google_custom_search_cx=None,config=None,base_preprompt=None,preprompt=None,decide_prompt=None,tools=None,builtin_tools=None,example=None,infos=None,work_folder=None,console=None,input_hook=None, display_hook=None,context_handler=None,text_to_audio_hook=None,audio_play_hook=None,thread_decorator=None):
         Pandora.setup_folder()
         self.name=name or 'Pandora'
         self.init_client(openai_api_key=openai_api_key)
         self.init_folders_and_files(work_folder=work_folder)
         self.init_config(config=config)
-        self.init_preprompts(base_preprompt=base_preprompt,preprompt=preprompt,example=example,infos=infos)
+        self.init_preprompts(base_preprompt=base_preprompt,preprompt=preprompt,example=example,decide_prompt=decide_prompt,infos=infos)
         self.collector=OutputCollector(self,display_hook=display_hook,context_handler=context_handler)
         processing_funcs=[
                 lambda chunk:chunk.replace("```run_python","```python"),
@@ -1199,7 +1201,7 @@ class Pandora:
         if config:
             self.config.update(config)
 
-    def init_preprompts(self,base_preprompt=None,preprompt=None,example=None,infos=None):
+    def init_preprompts(self,base_preprompt=None,preprompt=None,example=None,decide_prompt=None,infos=None):
         """
         Initializes the preprompts (base_preprompt, preprompt, example).
         First load the default base preprompt.
@@ -1209,6 +1211,7 @@ class Pandora:
         self.base_preprompt=Pandora.base_preprompt
         self.preprompt=''
         self.example=''
+        self.decide_prompt=None
 
         #load from constructor kwargs
         if base_preprompt:
@@ -1217,6 +1220,9 @@ class Pandora:
             self.preprompt=preprompt
         if example:
             self.example=example
+        if decide_prompt:
+            self.decide_prompt=decide_prompt
+        
 
         self.infos=infos or []
 
@@ -1800,6 +1806,27 @@ class Pandora:
             message = Message(content=s, role='system', name="system_bot",type='prompt')
             self.add_message(message)
 
+    def decide(self):
+        prompt=textwrap.dedent("""
+        [Assignement]
+        Based on the immediate context of the conversation (described above) between the user and the assistant:
+        - Output "1" if the assistant should continue generating or perform more action.
+        (For instance when the assistant is clearly in the middle of a task that require no additional user input in order to complete it.)
+        - Output "0" if the assistant should stop here and let the user make a move.
+        (For instance when the assistant has finished a task, or when it is asking for input from the user.)
+        
+        In case you're not sure what the assistant should do, output "0".
+        
+        Response:
+        
+        """)
+        decide_prompt=self.decide_prompt or prompt
+        response=self.completion(prompt=decide_prompt,context=self.get_messages()[-6:],max_tokens=1,temperature=0,model="gpt-3.5-turbo")
+        if int(response)==1:
+            return True
+        else:
+            return False
+        
     def proceed(self):
         """
         If called the AI will take another turn after the current one.
