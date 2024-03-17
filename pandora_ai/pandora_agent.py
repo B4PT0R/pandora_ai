@@ -1093,7 +1093,7 @@ class Pandora:
         """
         self.tools=tools or {}
         self.load_tools()
-        self.builtin_tools=builtin_tools or ['observe','generate_image','memory','open_in_browser','websearch','get_webdriver','retriever']
+        self.builtin_tools=builtin_tools or ['observe','generate_image','memory','open_in_browser','websearch','get_webdriver','get_text','retriever']
 
         if 'observe' in self.builtin_tools:
             self.add_tool(
@@ -1127,6 +1127,18 @@ class Pandora:
                 ),
                 required=["description","file_path"]
             )
+
+        if 'get_text' in self.builtin_tools:
+            self.add_tool(
+                name="get_text",
+                description="text=get_text(source) # Returns extracted text content or representation of a given source (directory, data structure, file, url, python object / module, ...) as a string.",
+                obj=get_text,
+                parameters=dict(
+                    source="(any) The source of text content. Can be a directory, file, url, module, class, function, variable. Can deal with a wide variety of sources."
+                ),
+                required=['source'],
+            )
+
 
         if 'retriever' in self.builtin_tools:
             self.add_tool(
