@@ -1206,8 +1206,13 @@ class Pandora:
             
             self.add_tool(
                 name="get_webdriver",
-                description="driver=get_webdriver() # This function returns a ready to use headless firefox selenium webdriver suitable for the current environment.",
-                obj=get_webdriver
+                description="driver=get_webdriver() # This function returns a preconfigured headless firefox selenium webdriver suitable tu run in the current environment.",
+                obj=get_webdriver,
+                example="""
+                driver = get_webdriver()
+                # Open Wikipedia webpage
+                driver.get('https://www.wikipedia.org')
+                """
             )
                  
     def init_TTS(self,text_to_audio_hook=None,audio_play_hook=None,thread_decorator=None):
