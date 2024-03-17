@@ -1133,7 +1133,7 @@ class Pandora:
                 name='retriever',
                 obj=self.retriever,
                 type='object',
-                descritpion="""
+                description="""
                 retriever # A document store used to implement your chunk-retrieval mechanism. Retrieval is automatic according to semantic relevance of loaded document chunks with respect to the current context.
                 # Methods:
                 retriever.get_titles() # returns the list of titles of documents saved as files in the document store (can be loaded in memory).
