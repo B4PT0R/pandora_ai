@@ -998,7 +998,7 @@ class Pandora:
                 lambda chunk:chunk.replace(r"\]","$$")
             ]
         self.token_processor=TokenProcessor(size=5,processing_funcs=processing_funcs)
-        self.retriever=Retriever(folder=os.path.join(self.workfolder,"documents"))
+        self.retriever=Retriever(folder=os.path.join(self.work_folder,"documents"))
         self.init_console(console=console,input_hook=input_hook)
         self.init_TTS(text_to_audio_hook=text_to_audio_hook,audio_play_hook=audio_play_hook,thread_decorator=thread_decorator)
         self.init_tools(tools=tools,builtin_tools=builtin_tools,google_custom_search_api_key=google_custom_search_api_key,google_custom_search_cx=google_custom_search_cx)
