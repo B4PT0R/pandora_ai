@@ -404,8 +404,10 @@ def total_tokens(messages):
 
 ###Main Functions and Classes
 
-def play_audio(audio_segment):
-    if audio_segment is not None: 
+def play_audio(audio):
+    if audio is not None and audio.get("bytes"):
+        audio_file_like = io.BytesIO(audio["bytes"])
+        audio_segment = AudioSegment.from_file(audio_file_like, format="mp3") 
         play(audio_segment)
 
 class NoContext:
@@ -1206,9 +1208,19 @@ class Pandora:
             for chunk in response.iter_bytes():
                 mp3_buffer.write(chunk)
 
-            mp3_buffer.seek(0)
-            audio_segment = AudioSegment.from_file(mp3_buffer,format="mp3").set_channels(1)
-            return audio_segment
+            # Convert MP3 to WAV and make it mono
+            audio = AudioSegment.from_file(mp3_buffer,format="mp3").set_channels(1)
+
+            # Extract audio properties
+            sample_rate = audio.frame_rate
+            sample_width = audio.sample_width
+
+            # Return the required dictionary
+            return {
+                "bytes": mp3_buffer.getvalue(),
+                "sample_rate": sample_rate,
+                "sample_width": sample_width
+            }
         else:
             return None
 
