@@ -360,18 +360,27 @@ def strip_newlines(string):
         string=newstring
     return string
 
-encoding=tiktoken.get_encoding("cl100k_base")
+tokenizer=tiktoken.get_encoding("cl100k_base")
 
 def tokenize(string):
-    int_tokens=encoding.encode(string)
-    str_tokens=[encoding.decode([int_token]) for int_token in int_tokens]
+    int_tokens=tokenizer.encode(string)
+    str_tokens=[tokenizer.decode([int_token]) for int_token in int_tokens]
     return str_tokens
 
 def token_count(string):
     """
     count tokens in a string
     """
-    return len(encoding.encode(string))
+    return len(tokenizer.encode(string))
+
+def truncate(string,max_tokens=2000):
+    tokens=tokenize(string)
+    if len(tokens)>max_tokens:
+        removed=len(tokens)-max_tokens
+        truncated=tokens[:int(max_tokens/2)]+[f"\n[Maximal message size reached: {removed} tokens truncated]\n"]+tokens[-int(max_tokens/2):]
+        return ''.join(truncated)
+    else:
+        return string
 
 def pack_msg(messages):
     """
@@ -395,47 +404,9 @@ def total_tokens(messages):
 
 ###Main Functions and Classes
 
-def play_audio(audio):
-    if audio is not None and audio.get("bytes"):
-        audio_file_like = io.BytesIO(audio["bytes"])
-        audio_segment = AudioSegment.from_file(audio_file_like, format="mp3") 
+def play_audio(audio_segment):
+    if audio_segment is not None: 
         play(audio_segment)
-
-def text_to_audio(text, openai_api_key=None):
-    
-    client=OpenAI(api_key=openai_api_key or os.getenv('OPENAI_API_KEY'))
-    
-    # Create MP3 audio
-    if text.strip():
-
-        mp3_buffer = io.BytesIO()
-
-        response = client.audio.speech.create(
-        model="tts-1",
-        voice="shimmer",
-        input=text
-        )
-
-        for chunk in response.iter_bytes():
-            mp3_buffer.write(chunk)
-
-        mp3_buffer.seek(0)
-
-        # Convert MP3 to WAV and make it mono
-        audio = AudioSegment.from_file(mp3_buffer,format="mp3").set_channels(1)
-
-        # Extract audio properties
-        sample_rate = audio.frame_rate
-        sample_width = audio.sample_width
-
-        # Return the required dictionary
-        return {
-            "bytes": mp3_buffer.getvalue(),
-            "sample_rate": sample_rate,
-            "sample_width": sample_width
-        }
-    else:
-        return None
 
 class NoContext:
     """
@@ -928,6 +899,7 @@ class Pandora:
         model="gpt-4-vision-preview",
         vision_enabled=True,
         voice_enabled=True,
+        voice="shimmer",
         enabled=True,
         language='en',
         uses_memory=True,
@@ -948,14 +920,18 @@ class Pandora:
         The user can use you as a regular python console in which he can run scripts, interact with you in many languages, or pass you files/images that you may analyze using your multimodal abilities.
         As an AI model, you've been trained to use the Python interpreter as your primary toolbox to perform various tasks. 
         Your responses are parsed and all parts matching the regex pattern r'```run_python(.*?)```' will get executed directly in your interpreter.
-        The interpreter's feedback will be redirected as system messages in context to inform your next steps or help you self-correct possible mistakes autonomously.
+        The interpreter's stdout is visible to the user and redirected as system messages in your context feed for feedback.
         The other parts of your response will be displayed as markdown chat messages to the user (KaTeX is supported).
+
+        Any time you decide to run python code, another turn of completion will start automatically after execution to let you review it and decide the next step.
+        To pass the turn back to the user, just don't run any python code.
 
         On top of popular python libraries that you may import in your python scripts, some specific tools are predeclared in your interpreter's namespace to help you deal with specific tasks.
         These tools and how you should use them in your scripts will be detailed in the 'TOOLS' section below.
 
         Don't make up answers, use your vast knowledge in combination with a smart use of available tools to craft informed responses to the user.
-        Plan your strategy and break down complex tasks in smaller steps, using possibly several turns to achieve them sequentially.
+
+        Plan your strategy and break down complex tasks in smaller steps, using possibly several turns of completion to achieve the task incrementally.
         In case you run into unexpected execution issues or don't what/how to do, default back to asking the user for guidance.
 
         Simplified example of the assistant expected behaviour:
@@ -1214,12 +1190,33 @@ class Pandora:
                 driver.get('https://www.wikipedia.org')
                 """
             )
-                 
+
+    def text_to_audio(self,text):
+        # Create MP3 audio
+        if text.strip():
+
+            mp3_buffer = io.BytesIO()
+
+            response = self.client.audio.speech.create(
+                model="tts-1",
+                voice=self.config.voice,
+                input=text
+            )
+
+            for chunk in response.iter_bytes():
+                mp3_buffer.write(chunk)
+
+            mp3_buffer.seek(0)
+            audio_segment = AudioSegment.from_file(mp3_buffer,format="mp3").set_channels(1)
+            return audio_segment
+        else:
+            return None
+
     def init_TTS(self,text_to_audio_hook=None,audio_play_hook=None,thread_decorator=None):
         """
         Initializes the TTS hooks used to speak out AI messages. 
         """
-        self.text_to_audio_hook=text_to_audio_hook or text_to_audio
+        self.text_to_audio_hook=text_to_audio_hook or self.text_to_audio
         self.audio_play_hook=audio_play_hook or play_audio
         self.thread_decorator=thread_decorator or (lambda thread:thread)
         self.voice_processor=VoiceProcessor(self)
@@ -1271,6 +1268,7 @@ class Pandora:
         """
         Adds a message the internal messages history
         """
+        message.content=truncate(message.content,max_tokens=self.config.max_tokens)
         self.messages.append(message)
 
     def add_user_prompt(self,content,tag='user_message'):
@@ -1716,9 +1714,8 @@ class Pandora:
             self.status("Running code.")
 
         for code in code_parts:
-            self.console.run(self.replace(code.strip()))
-            if self.console.get_result():
-                self.new_turn=True
+            self.new_turn=True
+            self.console.run(self.replace(code.strip()))    
         
         self.status("#DONE#")
 

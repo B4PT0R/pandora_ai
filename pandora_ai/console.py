@@ -70,28 +70,11 @@ class SilentIO:
         pass
 
 def remove_empty_lines(script):
-    # Regular expression for multiline string literals
-    multiline_string_pattern = r"('''[\s\S]*?'''|\"\"\"[\s\S]*?\"\"\")"
-
-    # Placeholder dictionary for multiline string literals
-    placeholders = {}
-    def replace_with_placeholder(match):
-        placeholder = f"__MULTILINE_STRING_{len(placeholders)}__"
-        placeholders[placeholder] = match.group(0)
-        return placeholder
-
-    # Replace multiline string literals with placeholders
-    script_with_placeholders = re.sub(multiline_string_pattern, replace_with_placeholder, script)
-
-    # Remove empty lines from the rest of the script
-    non_empty_lines = [line for line in script_with_placeholders.split('\n') if line.strip()]
-
-    # Reinsert multiline string literals
-    processed_script = '\n'.join(non_empty_lines)
-    for placeholder, string_literal in placeholders.items():
-        processed_script = processed_script.replace(placeholder, string_literal)
-
-    return processed_script
+    pattern = re.compile(r"('''[\s\S]*?'''|\"\"\"[\s\S]*?\"\"\")")
+    multiline_strings = list(match.group(0) for match in re.finditer(pattern, script))
+    script = re.sub(pattern, lambda m:f'§§§{multiline_strings.index(m.group(0))}§§§', script)
+    script = '\n'.join(line for line in script.split('\n') if line.strip())
+    return re.sub(r'§§§(\d+)§§§', lambda m:multiline_strings[int(m.group(1))], script)
 
 class Console(InteractiveConsole):
     # The python interpreter in which the code typed in the input cell will be run
