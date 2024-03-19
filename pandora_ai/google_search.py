@@ -8,6 +8,9 @@ def root_join(*args):
 
 from googleapiclient.discovery import build
 
+def subdict(original_dict, keys):
+    return {k: original_dict[k] for k in keys if k in original_dict}
+
 def google_search(api_key,cse_id,query, num=5, start=1, type='web'):
     service = build("customsearch", "v1", developerKey=api_key)
     ns = num // 10
@@ -25,7 +28,7 @@ def google_search(api_key,cse_id,query, num=5, start=1, type='web'):
                 args_dict['searchType'] = 'image'
             res = service.cse().list(**args_dict).execute()
             for item in res['items']:
-                results.append(item)
+                results.append(subdict(item,["title","link","snippet","image.contextLink"]))
     if not r == 0:
         args_dict = {
             'cx': cse_id,
@@ -37,7 +40,7 @@ def google_search(api_key,cse_id,query, num=5, start=1, type='web'):
             args_dict['searchType'] = 'image'
         res = service.cse().list(**args_dict).execute()
         for item in res['items']:
-            results.append(item)
+            results.append(subdict(item,["title","link","snippet","image.contextLink"]))
 
     return results
 
