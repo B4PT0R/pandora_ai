@@ -28,7 +28,7 @@ def google_search(api_key,cse_id,query, num=5, start=1, type='web'):
                 args_dict['searchType'] = 'image'
             res = service.cse().list(**args_dict).execute()
             for item in res['items']:
-                results.append(subdict(item,["title","link","snippet","image.contextLink"]))
+                results.append(subdict(item,["title","link","snippet"]))
     if not r == 0:
         args_dict = {
             'cx': cse_id,
@@ -40,7 +40,7 @@ def google_search(api_key,cse_id,query, num=5, start=1, type='web'):
             args_dict['searchType'] = 'image'
         res = service.cse().list(**args_dict).execute()
         for item in res['items']:
-            results.append(subdict(item,["title","link","snippet","image.contextLink"]))
+            results.append(subdict(item,["title","link","snippet"]))
 
     return results
 
