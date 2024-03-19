@@ -1170,13 +1170,20 @@ class Pandora:
             google_custom_search_api_key=google_custom_search_api_key or os.getenv('GOOGLE_CUSTOM_SEARCH_API_KEY')
             google_custom_search_cx=google_custom_search_cx or os.getenv('GOOGLE_CUSTOM_SEARCH_CX') 
             google_search=init_google_search(api_key=google_custom_search_api_key,cse_id=google_custom_search_cx)
-            def websearch(query,num=5,type='web'):
-                self.observe(google_search(query,num,type))
+            def websearch(query,num=5,start=1,type='web'):
+                self.observe(google_search(query,num,start,type))
             
             self.add_tool(
                 name="websearch",
-                description="websearch(query,num=5,type='web') # Make a google search. type can be either 'web' or 'image'. Results are automatically observed (returns None).",
-                obj=websearch
+                description="websearch(query,num=5,start=1,type='web') # Make a google search. Results are automatically observed (returns None).",
+                obj=websearch,
+                parameters=dict(
+                    query="(string) The search query.",
+                    num="(integer) The desired number of results.",
+                    start="(integer) The relevance rank from which to start returning results.",
+                    type="('web' or 'image') The search type."
+                ),
+                required=['query']
             )
 
         if 'get_webdriver' in self.builtin_tools:
@@ -1207,6 +1214,8 @@ class Pandora:
 
             for chunk in response.iter_bytes():
                 mp3_buffer.write(chunk)
+
+            mp3_buffer.seek(0)
 
             # Convert MP3 to WAV and make it mono
             audio = AudioSegment.from_file(mp3_buffer,format="mp3").set_channels(1)

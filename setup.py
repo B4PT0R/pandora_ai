@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="pandora_ai",
-    version="0.0.30",
+    version="0.0.32",
     author="Baptiste Ferrand",
     author_email="bferrand.maths@gmail.com",
     description="GPT4-powered python interpreter / AI assistant",
@@ -34,7 +34,8 @@ setuptools.setup(
         "PyPDF2",
         "python-docx",
         "requests",
-        "tiktoken"
+        "tiktoken",
+        "pydub"
     ],
     python_requires='>=3.6',
 )
