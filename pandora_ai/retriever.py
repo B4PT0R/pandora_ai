@@ -4,7 +4,7 @@ import numpy as np
 import json
 import os
 
-encoding=tiktoken.get_encoding("cl100k_base")
+tokenizer=tiktoken.get_encoding("cl100k_base")
 
 def get_text(file):
     if os.path.isfile(file):
@@ -22,7 +22,7 @@ def token_count(string):
     """
     count tokens in a string
     """
-    return len(encoding.encode(string))
+    return len(tokenizer.encode(string))
 
 def split_string(string, delimiters):
     """
@@ -76,6 +76,7 @@ def split_text(text, max_tokens):
         chunks.append(current_chunk.strip())
     
     return chunks
+
 
 class Retriever:
 
@@ -159,4 +160,9 @@ class Retriever:
     
 if __name__=='__main__':
     
-    ret=Retriever()
+    pass
+
+
+
+
+

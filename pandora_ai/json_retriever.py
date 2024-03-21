@@ -1,0 +1,306 @@
+from openai import OpenAI # for calling the OpenAI API
+import tiktoken  # for counting tokens
+import numpy as np
+import json
+import os
+
+tokenizer=tiktoken.get_encoding("cl100k_base")
+
+def normalize(vect,precision=5):
+    inv_norm=1.0/np.linalg.norm(vect,ord=2)
+    return [round(x_i*(inv_norm),precision) for x_i in vect]
+
+def flattener(data):
+    def _traverse(obj, keys, output):
+        if isinstance(obj, dict):
+            if not obj:
+                output.append((keys, {}))  # Handle empty dict
+            for k, v in obj.items():
+                _traverse(v, keys + (k,), output)
+        elif isinstance(obj, list):
+            if not obj:
+                output.append((keys, []))  # Handle empty list
+            for idx, item in enumerate(obj):
+                _traverse(item, keys + (idx,), output)
+        else:
+            output.append((keys, obj))
+
+    output = []
+    # Start with an empty tuple for the key sequence of the root object
+    _traverse(data, tuple(), output)
+    # Handle single values and empty structures directly
+    if not output:
+        output.append((tuple(), data))
+    return output
+
+def builder(flat_list):
+    # Handle single value case
+    if len(flat_list) == 1 and flat_list[0][0] == ():
+        return flat_list[0][1]
+
+    # Determine the root type from the first key sequence if the flat list is not empty
+    root = [] if flat_list and isinstance(flat_list[0][0][0], int) else {}
+    
+    for keys, value in flat_list:
+        # Handle empty structure case
+        if not keys:
+            return value
+
+        current_level = root
+        for i, key in enumerate(keys):
+            # If it's the last key in the sequence, set the value
+            if i == len(keys) - 1:
+                if isinstance(key, int):
+                    # Ensure the current level is a list for integer keys
+                    while len(current_level) <= key:
+                        current_level.append(None)
+                    current_level[key] = value
+                else:
+                    current_level[key] = value
+            else:
+                # Prepare next level structure
+                if isinstance(key, int):
+                    while len(current_level) <= key:
+                        current_level.append({} if (i + 1 < len(keys) and not isinstance(keys[i + 1], int)) else [])
+                    current_level = current_level[key]
+                else:
+                    if key not in current_level:
+                        current_level[key] = {} if (i + 1 < len(keys) and not isinstance(keys[i + 1], int)) else []
+                    current_level = current_level[key]
+    return root
+
+def is_in(keys,content):
+    strkeys=keys_as_str(keys)
+    return any(keys.startswith(strkeys) for keys in content.keys())
+
+def is_prefix(keys1,keys2):
+    return keys2[:len(keys1)]==keys1
+
+def to_str(data):
+    if isinstance(data,str):
+        return "'"+data+"'"
+    else:
+        return str(data)
+
+def keys_as_str(keys):
+    return ''.join(['['+to_str(key)+']' for key in keys])
+
+def as_string(entry):
+    return 'data'+keys_as_str(entry[0])+"="+to_str(entry[1])
+
+def subdict(original_dict, keys):
+    return {k: original_dict[k] for k in keys if k in original_dict}
+
+class Item:
+
+    def __init__(self,nested=None,keys=None):
+        self.keys=keys
+        self._content=None
+        self.nested=nested
+
+    @property
+    def content(self):
+        content = {}
+        key_str_start = keys_as_str(self.keys)
+        for entry in self.nested.table['content'].values():
+            if keys_as_str(entry["keys"]).startswith(key_str_start):
+                content[keys_as_str(entry["keys"])]=entry
+        return content
+    
+    @property
+    def value(self):
+        # Reconstruct the nested substructure from the flat content
+        flat_list = [(entry['keys'][len(self.keys):], entry['value']) for entry in self.content.values()]
+        return builder(flat_list)
+    
+    def __getitem__(self,key):
+        keys=self.keys+(key,)
+        
+        if is_in(keys,self.content):
+            return Item(nested=self.nested, keys=keys)
+        else:
+            raise KeyError(f"Key {key} does not exist.")
+    
+    def __setitem__(self, key, value):
+        # Construct the full key sequence for the new or updated value
+        keys = self.keys + (key,)
+        self.nested.set_value(keys, value)
+
+    def __delitem__(self, key):
+        keys=self.keys+(key,)
+
+        if is_in(keys,self.content):
+            self.nested.delete_value(keys)
+        else:
+            raise KeyError(f"Key {key} does not exist.")
+    
+    def __repr__(self):
+        return repr(self.value)
+    
+    def __str__(self):
+        return str(self.value)
+    
+    def search(self,query,num=3,threshold=0.3):
+        vect=self.nested.embed([query])[0]
+        results=[]
+        for entry in self.content.values():
+            results.append((entry["string"],np.dot(vect,entry["embedding"])))
+        results.sort(key=lambda result: result[1], reverse=True)
+        results=list(filter(lambda result:result[1]>=threshold,results))
+        return results[:num]
+
+
+class Nested(Item):
+
+    def __init__(self,openai_api_key=None,file=None,dimensions=128,precision=5):
+        Item.__init__(self,nested=self,keys=tuple())
+        self.file=file
+        self.dimensions=dimensions
+        self.precision=precision
+        self.client=OpenAI(api_key=openai_api_key or os.getenv('OPENAI_API_KEY'),timeout=3)
+        self.table=dict(
+            dimensions=self.dimensions,
+            precision=self.precision,
+            content=dict()
+        )
+
+    def embed(self,lines):
+        success=False
+        while not success:
+            try:
+                response=self.client.embeddings.create(
+                    input=lines,
+                    model="text-embedding-3-small",
+                    dimensions=self.dimensions
+                )
+            except Exception as e:
+                print(str(e))
+                success=False
+            else:
+                success=True
+        embeddings=[normalize(response.data[i].embedding,self.precision) for i in range(len(lines))]
+        return embeddings
+    
+    def load(self,file=None):
+        file=file or self.file
+        if os.path.isfile(file) and file.endswith('.json'): 
+            with open(file) as f:
+                self.table=json.load(f)
+            self.dimensions=self.table['dimensions']
+            self.precision=self.table['precision']
+
+
+    def dump(self,file=None):
+        file=file or self.file
+        if file.endswith('.json'):
+            with open(file,'w') as f:
+                json.dump(self.table,f)
+
+    def load_data(self,json_data):
+        self.table=dict(
+            dimensions=self.dimensions,
+            precision=self.precision,
+            content=dict()
+        )
+        entries=flattener(json_data)
+        strings=[as_string(entry) for entry in entries]
+        embeddings=self.embed(strings)
+        for i in range(len(entries)):
+            keys,value=entries[i]
+            self.table['content'][keys_as_str(keys)]=dict(
+                keys=keys,
+                value=value,
+                string=strings[i],
+                embedding=embeddings[i]
+            )
+
+    def set_value(self, keys, value):
+        # Prepare the string and embedding for the new value
+        # If the value is structured, it is first converted to a flat list of entries
+        if isinstance(value, dict) or isinstance(value, list):
+            entries = [(keys+entry[0],entry[1]) for entry in flattener(value)]
+            strings=[as_string(entry) for entry in entries]
+            embeddings=self.embed(strings)
+            for i in range(len(entries)):
+                keys,value=entries[i]
+                self.table['content'][keys_as_str(keys)]=dict(
+                    keys=keys,
+                    value=value,
+                    string=strings[i],
+                    embedding=embeddings[i]
+                )
+        else:
+            string = as_string((keys, value))
+            embedding = self.embed([string])[0]
+            # Otherwise, add a new entry
+            self.table['content'][keys_as_str(keys)]=dict(
+                keys= keys,
+                value= value,
+                string=string,
+                embedding=embedding
+            )
+
+    def delete_value(self, keys):
+        #removes any entries that are prefixed with the key sequence of the deleted item
+        self.table['content'] = {keys_as_str(entry['keys']):entry for entry in self.table['content'].values() if not is_prefix(keys,entry['keys'])}
+
+    def from_json_string(self,json_string):
+        json_data=json.loads(json_string)
+        self.load_data(json_data)
+
+    def from_json_file(self,json_file):
+        if os.path.isfile(json_file) and json_file.endswith('.json'):
+            with open(json_file,'w') as f:
+                json_data=json.load(f)
+            self.load_data(json_data)
+
+
+
+if __name__=='__main__':
+
+    data=dict(
+        users=dict(
+            Baptiste=dict(
+                age=38,
+                job="Programmer",
+                city="Vibeuf",
+                hobby="Guitar playing",
+                email="bferrand.maths@gmail.com"
+            ),
+            Manon=dict(
+                age=35,
+                job="Nurse",
+                city="Guignen",
+                hobby="Going to the cinema.",
+                email="manon.ferrand@laposte.net"
+            )
+        )
+    )
+
+    nested=Nested(file='test.json')
+
+    #nested.create_table(data)
+    #nested.dump()
+    nested.load()
+
+    nested['users']['Aurélien']=dict(
+        age=37,
+        job="Cook",
+        city="Rouen",
+        hobby="Video games",
+        email="aurelien.mariotto@gmail.com",
+        test="test"
+    )
+
+    del nested['users']['Aurélien']['test']
+
+    print(nested)
+
+    print(nested.search("Where does Aurélien live?"))
+
+    
+
+
+
+
+
