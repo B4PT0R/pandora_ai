@@ -70,8 +70,7 @@ def builder(flat_list):
     return root
 
 def is_in(keys,content):
-    strkeys=keys_as_str(keys)
-    return any(keys.startswith(strkeys) for keys in content.keys())
+    return any(is_prefix(keys,entry["keys"]) for entry in content)
 
 def is_prefix(keys1,keys2):
     return keys2[:len(keys1)]==keys1
@@ -101,9 +100,8 @@ class Item:
     @property
     def content(self):
         content = {}
-        key_str_start = keys_as_str(self.keys)
         for entry in self.nested.table['content'].values():
-            if keys_as_str(entry["keys"]).startswith(key_str_start):
+            if is_prefix(self.keys,entry["keys"]):
                 content[keys_as_str(entry["keys"])]=entry
         return content
     
