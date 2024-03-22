@@ -78,7 +78,7 @@ def split_text(text, max_tokens):
     return chunks
 
 
-class Retriever:
+class TextRetriever:
 
     def __init__(self,openai_api_key=None,chunk_size=100,dimensions=128,folder="./documents"):
         self.store={}

@@ -49,7 +49,8 @@ import time
 from datetime import datetime
 from objdict_bf import objdict
 from console import Console
-from retriever import Retriever
+from text_retriever import TextRetriever
+from json_retriever import JsonRetriever
 from get_text import get_text
 import base64
 import requests
@@ -976,7 +977,8 @@ class Pandora:
                 lambda chunk:chunk.replace(r"\]","$$")
             ]
         self.token_processor=TokenProcessor(size=5,processing_funcs=processing_funcs)
-        self.retriever=Retriever(openai_api_key=self.client.api_key,folder=os.path.join(self.work_folder,"documents"))
+        self.text_retriever=TextRetriever(openai_api_key=self.client.api_key,folder=os.path.join(self.work_folder,"text_documents"))
+        self.json_retriever=JsonRetriever(openai_api_key=self.client.api_key,folder=os.path.join(self.work_folder,"json_documents"))
         self.init_console(console=console,input_hook=input_hook)
         self.init_TTS(text_to_audio_hook=text_to_audio_hook,audio_play_hook=audio_play_hook,thread_decorator=thread_decorator)
         self.init_tools(tools=tools,builtin_tools=builtin_tools,google_custom_search_api_key=google_custom_search_api_key,google_custom_search_cx=google_custom_search_cx)
@@ -1118,19 +1120,19 @@ class Pandora:
             )
 
 
-        if 'retriever' in self.builtin_tools:
+        if 'text_retriever' in self.builtin_tools:
             self.add_tool(
-                name='retriever',
-                obj=self.retriever,
+                name='text_retriever',
+                obj=self.text_retriever,
                 type='object',
                 description="""
-                retriever # A document store used to implement your chunk-retrieval mechanism. Retrieval is automatic according to semantic relevance of loaded document chunks with respect to the current context.
+                text_retriever # A document store used to implement your chunk-retrieval mechanism. Retrieval is automatic according to semantic relevance of loaded document chunks with respect to the current context.
                 # Methods:
-                retriever.get_titles() # returns the list of titles of documents saved as files in the document store (can be loaded in memory).
-                retriever.get_loaded() # returns the list of titles of documents currently loaded in memory and active for chunk retrieval.
-                retriever.new_document(title,text,description) # Create a new stored document from a givent text content (chunked, embedded, saved and loaded for semantic search).
-                retriever.load_docuemnt(title) # Loads a document in memory.
-                retriever.close_document(title) # unloads a document from memory.
+                text_retriever.get_titles() # returns the list of titles of documents saved as files in the document store (can be loaded in memory).
+                text_retriever.get_loaded() # returns the list of titles of documents currently loaded in memory and active for chunk retrieval.
+                text_retriever.new_document(title,text,description) # Create a new stored document from a givent text content (chunked, embedded, saved and loaded for semantic search).
+                text_retriever.load_docuemnt(title) # Loads a document in memory.
+                text_retriever.close_document(title) # unloads a document from memory.
                 """
             )
 
@@ -1797,8 +1799,13 @@ class Pandora:
         self.process_user_input(prompt)
         if self.get_prompts() and self.config.enabled:
             if self.authenticated:
-                if self.retriever.get_loaded():
-                    results=self.retriever.search(query='\n'.join(prompt.content for prompt in self.get_prompts()),num=5)
+                if self.text_retriever.get_loaded():
+                    results=self.text_retriever.search(query='\n'.join(prompt.content for prompt in self.get_prompts()),num=5)
+                    if results:
+                        msg=Message(content=str(results),role="system",name="Retriever",type="temp")
+                        self.add_message(msg)
+                if self.json_retriever.get_loaded():
+                    results=self.json_retriever.search(query='\n'.join(prompt.content for prompt in self.get_prompts()),num=5)
                     if results:
                         msg=Message(content=str(results),role="system",name="Retriever",type="temp")
                         self.add_message(msg)

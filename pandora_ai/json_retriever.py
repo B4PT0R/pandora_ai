@@ -73,7 +73,10 @@ def is_in(keys,content):
     return any(is_prefix(keys,entry["keys"]) for entry in content)
 
 def is_prefix(keys1,keys2):
-    return keys2[:len(keys1)]==keys1
+    if keys1==tuple():
+        return True
+    else:
+        return keys2[:len(keys1)]==keys1
 
 def to_str(data):
     if isinstance(data,str):
@@ -84,8 +87,8 @@ def to_str(data):
 def keys_as_str(keys):
     return ''.join(['['+to_str(key)+']' for key in keys])
 
-def as_string(entry):
-    return 'data'+keys_as_str(entry[0])+"="+to_str(entry[1])
+def as_string(title,entry):
+    return title+keys_as_str(entry[0])+"="+to_str(entry[1])
 
 def subdict(original_dict, keys):
     return {k: original_dict[k] for k in keys if k in original_dict}
@@ -94,7 +97,6 @@ class Item:
 
     def __init__(self,nested=None,keys=None):
         self.keys=keys
-        self._content=None
         self.nested=nested
 
     @property
@@ -150,24 +152,27 @@ class Item:
 
 class Nested(Item):
 
-    def __init__(self,openai_api_key=None,file=None,dimensions=128,precision=5):
+    def __init__(self,openai_api_key=None,title=None,description=None,dimensions=128,precision=5):
         Item.__init__(self,nested=self,keys=tuple())
-        self.file=file
+        self.title=title
+        self.description=description
         self.dimensions=dimensions
         self.precision=precision
         self.client=OpenAI(api_key=openai_api_key or os.getenv('OPENAI_API_KEY'),timeout=3)
         self.table=dict(
+            title=self.title,
+            description=self.description,
             dimensions=self.dimensions,
             precision=self.precision,
             content=dict()
         )
 
-    def embed(self,lines):
+    def embed(self,strings):
         success=False
         while not success:
             try:
                 response=self.client.embeddings.create(
-                    input=lines,
+                    input=strings,
                     model="text-embedding-3-small",
                     dimensions=self.dimensions
                 )
@@ -176,32 +181,39 @@ class Nested(Item):
                 success=False
             else:
                 success=True
-        embeddings=[normalize(response.data[i].embedding,self.precision) for i in range(len(lines))]
+        embeddings=[normalize(response.data[i].embedding,self.precision) for i in range(len(strings))]
         return embeddings
     
-    def load(self,file=None):
-        file=file or self.file
-        if os.path.isfile(file) and file.endswith('.json'): 
+    def load_document(self,file):
+        if os.path.isfile(file) and file.endswith('.json'):
             with open(file) as f:
                 self.table=json.load(f)
-            self.dimensions=self.table['dimensions']
-            self.precision=self.table['precision']
+            self.title=self.table["title"]
+            self.description=self.table["description"]
+            self.precision=self.table["precision"]
+            self.dimensions=self.table["dimensions"]
 
-
-    def dump(self,file=None):
-        file=file or self.file
+    def save_document(self,file):
         if file.endswith('.json'):
             with open(file,'w') as f:
+                self.table["title"]=self.title
+                self.table["description"]=self.description
+                self.table["precision"]=self.precision
+                self.table["dimensions"]=self.dimensions
                 json.dump(self.table,f)
+            
 
-    def load_data(self,json_data):
-        self.table=dict(
-            dimensions=self.dimensions,
-            precision=self.precision,
-            content=dict()
-        )
+    def load_content(self,content):
+        if isinstance(content,str) and content.endswith(".json") and os.path.isfile(content):
+            self.load_json_file(json_file=content)
+        elif isinstance(content,str):
+            self.load_json_string(json_string=content)
+        else:
+            self.load_json_data(content)
+
+    def load_json_data(self,json_data):
         entries=flattener(json_data)
-        strings=[as_string(entry) for entry in entries]
+        strings=[as_string(self.title,entry) for entry in entries]
         embeddings=self.embed(strings)
         for i in range(len(entries)):
             keys,value=entries[i]
@@ -212,12 +224,22 @@ class Nested(Item):
                 embedding=embeddings[i]
             )
 
+    def load_json_string(self,json_string):
+        json_data=json.loads(json_string)
+        self.load_json_data(json_data)
+
+    def load_json_file(self,json_file):
+        if os.path.isfile(json_file) and json_file.endswith('.json'):
+            with open(json_file,'w') as f:
+                json_data=json.load(f)
+            self.load_json_data(json_data)
+
     def set_value(self, keys, value):
         # Prepare the string and embedding for the new value
         # If the value is structured, it is first converted to a flat list of entries
         if isinstance(value, dict) or isinstance(value, list):
             entries = [(keys+entry[0],entry[1]) for entry in flattener(value)]
-            strings=[as_string(entry) for entry in entries]
+            strings=[as_string(self.title,entry) for entry in entries]
             embeddings=self.embed(strings)
             for i in range(len(entries)):
                 keys,value=entries[i]
@@ -228,7 +250,7 @@ class Nested(Item):
                     embedding=embeddings[i]
                 )
         else:
-            string = as_string((keys, value))
+            string = as_string(self.title,(keys, value))
             embedding = self.embed([string])[0]
             # Otherwise, add a new entry
             self.table['content'][keys_as_str(keys)]=dict(
@@ -242,16 +264,54 @@ class Nested(Item):
         #removes any entries that are prefixed with the key sequence of the deleted item
         self.table['content'] = {keys_as_str(entry['keys']):entry for entry in self.table['content'].values() if not is_prefix(keys,entry['keys'])}
 
-    def from_json_string(self,json_string):
-        json_data=json.loads(json_string)
-        self.load_data(json_data)
 
-    def from_json_file(self,json_file):
-        if os.path.isfile(json_file) and json_file.endswith('.json'):
-            with open(json_file,'w') as f:
-                json_data=json.load(f)
-            self.load_data(json_data)
+class JsonRetriever:
 
+    def __init__(self,openai_api_key=None,folder='./json_documents'):
+        self.openai_api_key=openai_api_key
+        self.folder=folder
+        self.store={}
+        if not os.path.exists(self.folder):
+            os.makedirs(self.folder)
+
+    def get_loaded(self):
+        return [dict(title=doc.title,description=doc.description) for doc in self.store.values()]
+    
+    def get_titles(self):
+        return [os.path.basename(file).split('.')[0] for file in os.listdir(self.folder)]
+    
+    def save_document(self,title):
+        if title in self.store:
+            file=os.path.join(self.folder,f"{title}.json")
+            self.store[title].save_document(file)
+
+    def load_document(self,title):
+        if title not in self.store:
+            file=os.path.join(self.folder,f"{title}.json")
+            if os.path.isfile(file):
+                self.store[title]=Nested(self.openai_api_key,title=title)
+                self.store[title].load_document(file)
+            else:
+                self.store[title]=Nested(self.openai_api_key,title=title)
+
+    def close_document(self,title):
+        if title in self.store:
+            del self.store[title]
+
+    def new_document(self,title,content,description):
+        self.store[title]=Nested(self.openai_api_key,title=title,description=description)
+        if content:
+            self.store[title].load_content(content=content)
+        self.save_document(title)
+        print(f"Successfully created document '{title}' : path='{self.folder}/{title}.json'")
+
+    def search(self,query,titles='all',num=5,threshold=0.3):
+        if titles=='all':
+            titles=self.store.keys()
+        results={}
+        for title in titles:
+            results[title]=self.store[title].search(query,num=num,threshold=threshold)
+        return results
 
 
 if __name__=='__main__':
@@ -275,26 +335,15 @@ if __name__=='__main__':
         )
     )
 
-    nested=Nested(file='test.json')
+    store=JsonRetriever()
 
-    #nested.create_table(data)
-    #nested.dump()
-    nested.load()
+    #store.new_document(title="test",content=data,description="A test data structure.")
+    store.load_document("test")
 
-    nested['users']['Aurélien']=dict(
-        age=37,
-        job="Cook",
-        city="Rouen",
-        hobby="Video games",
-        email="aurelien.mariotto@gmail.com",
-        test="test"
-    )
+    print(store.search("Where does Manon live ?"))
 
-    del nested['users']['Aurélien']['test']
 
-    print(nested)
 
-    print(nested.search("Where does Aurélien live?"))
 
     
 
