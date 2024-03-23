@@ -1073,7 +1073,7 @@ class Pandora:
         """
         self.tools=tools or {}
         self.load_tools()
-        self.builtin_tools=builtin_tools or ['observe','generate_image','memory','open_in_browser','websearch','get_webdriver','get_text','retriever']
+        self.builtin_tools=builtin_tools or ['observe','generate_image','memory','open_in_browser','websearch','get_webdriver','get_text','text_retriever',"json_retriever"]
 
         if 'observe' in self.builtin_tools:
             self.add_tool(
@@ -1126,20 +1126,40 @@ class Pandora:
                 obj=self.text_retriever,
                 type='object',
                 description="""
-                text_retriever # A document store used to implement your chunk-retrieval mechanism. Retrieval is automatic according to semantic relevance of loaded document chunks with respect to the current context.
+                text_retriever # A document store used to implement your chunk-retrieval mechanism on text data. Retrieval is automatic according to semantic relevance of loaded document chunks with respect to the current context.
                 # Methods:
                 text_retriever.get_titles() # returns the list of titles of documents saved as files in the document store (can be loaded in memory).
                 text_retriever.get_loaded() # returns the list of titles of documents currently loaded in memory and active for chunk retrieval.
                 text_retriever.new_document(title,text,description) # Create a new stored document from a givent text content (chunked, embedded, saved and loaded for semantic search).
-                text_retriever.load_docuemnt(title) # Loads a document in memory.
+                text_retriever.load_document(title) # Loads a document in memory.
                 text_retriever.close_document(title) # unloads a document from memory.
+                """
+            )
+
+        if 'json_retriever' in self.builtin_tools:
+            self.add_tool(
+                name='json_retriever',
+                obj=self.json_retriever,
+                type='object',
+                description="""
+                json_retriever # A document store used to implement your data-retrieval mechanism on JSON data. Retrieval is automatic according to semantic relevance of loaded content with respect to the current context.
+                # Methods:
+                json_retriever.get_titles() # returns the list of titles of documents saved as files in the document store (can be loaded in memory).
+                json_retriever.get_loaded() # returns the list of titles of documents currently loaded in memory and active for chunk retrieval.
+                json_retriever.new_document(title,content,description) # Create a new stored document from a given json content (either data, string or file) that is parsed, embedded and loaded for semantic search.
+                json_retriever.load_document(title) # Loads a document in memory.
+                json_retriever.close_document(title) # unloads a document from memory.
+                json_retriever.search(query) # returns most relevant pieces of informations found in the loaded documents related to a query.
+                document=json_retriever.store[title] # access the document object in the store
+                data=document['example']['key']['sequence'] # access data in the document
+                document['example']['key']['sequence']=new_data # change data in the documentm
                 """
             )
 
         if 'return_output' in self.builtin_tools:
             self.add_tool(
                 name='return_output',
-                description="return_output(data) # Use this function whenever you're explicitely asked to return data. This allows the user to use you as an intelligent python function like so : 'data=MagicFunction(query,**kwargs)'.",
+                description="return_output(data) # Use this function whenever you're explicitely asked to 'return' data. This allows the user to use you programmatically as an intelligent python function like so : 'data=assistant(query,**kwargs)'.",
                 obj=self.return_output,
                 example="""
                 user:
@@ -1162,7 +1182,7 @@ class Pandora:
         if 'memory' in self.builtin_tools:
             self.add_tool(
                 name="memory",
-                description="memory # a custom nested attribute-style access data structure linked to a JSON file for long lasting storage. Supports dump() method to save the content to the file, and dumps() to serialize into a string. Nested keys must all be valid identifiers.",
+                description="memory # a custom nested data structure linked to a JSON file for long lasting storage implementing semantic retrieval. Supports dump() method to save the content to the file.",
                 obj=self.memory,
                 type="object"
             )
@@ -1196,9 +1216,13 @@ class Pandora:
                 description="driver=get_webdriver() # This function returns a preconfigured headless firefox selenium webdriver suitable tu run in the current environment.",
                 obj=get_webdriver,
                 example="""
+                # Spawn a webdriver
                 driver = get_webdriver()
-                # Open Wikipedia webpage
+                # Use it to open Wikipedia webpage (for example)
                 driver.get('https://www.wikipedia.org')
+                # Do other things...
+                # Close it
+                driver.close()
                 """
             )
 
@@ -1530,6 +1554,23 @@ class Pandora:
             return [memory]
         else:
             return []
+        
+    def get_retrieved(self):
+        prompts=self.get_prompts()
+        output=[]
+        if prompts:
+            if self.text_retriever.get_loaded():
+                results=self.text_retriever.search(query='\n'.join(prompt.content for prompt in prompts),num=20,threshold=0.2)
+                if results:
+                    msg=Message(content=str(results),role="system",name="TextRetriever")
+                    output.append(msg)
+            if self.json_retriever.get_loaded():
+                results=self.json_retriever.search(query='\n'.join(prompt.content for prompt in prompts),num=20,threshold=0.2)
+                if results:
+                    msg=Message(content=str(results),role="system",name="JsonRetriever")
+                    output.append(msg)
+        return output
+
 
     def get_messages(self,type='all',tag='all'):
         """
@@ -1600,7 +1641,7 @@ class Pandora:
         Generates a context (ie. a coherent list of messages) by agregating and sorting messages with various roles.
         Namely: 
         - global system messages (preprompt,example,tools,info,memory) ; 
-        - temporary messages resulting from tool calls
+        - temporary messages resulting from tool calls and semantic retrieval
         - queued messages from the history
         - prompts passed by the user.
         """
@@ -1611,9 +1652,10 @@ class Pandora:
         info=self.get_infos()
         temp=self.get_temp()
         tools=self.get_tools()
-        count=total_tokens(preprompt+tools+info+example+memory+temp+prompts)
+        retrieved=self.get_retrieved()
+        count=total_tokens(preprompt+tools+info+example+memory+temp+prompts+retrieved)
         queued=self.get_queued(count)
-        context=preprompt+tools+info+example+memory+Sort(queued+temp+prompts)
+        context=preprompt+tools+info+example+memory+Sort(queued+temp+prompts+retrieved)
         self.send_prompts_to_queue()
         return context
 
@@ -1799,16 +1841,6 @@ class Pandora:
         self.process_user_input(prompt)
         if self.get_prompts() and self.config.enabled:
             if self.authenticated:
-                if self.text_retriever.get_loaded():
-                    results=self.text_retriever.search(query='\n'.join(prompt.content for prompt in self.get_prompts()),num=5)
-                    if results:
-                        msg=Message(content=str(results),role="system",name="Retriever",type="temp")
-                        self.add_message(msg)
-                if self.json_retriever.get_loaded():
-                    results=self.json_retriever.search(query='\n'.join(prompt.content for prompt in self.get_prompts()),num=5)
-                    if results:
-                        msg=Message(content=str(results),role="system",name="Retriever",type="temp")
-                        self.add_message(msg)
                 self.process()
             elif not self.warning:
                 self.warning=True

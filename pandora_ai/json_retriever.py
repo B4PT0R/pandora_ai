@@ -16,21 +16,21 @@ def flattener(data):
             if not obj:
                 output.append((keys, {}))  # Handle empty dict
             for k, v in obj.items():
-                _traverse(v, keys + (k,), output)
+                _traverse(v, keys + [k], output)
         elif isinstance(obj, list):
             if not obj:
                 output.append((keys, []))  # Handle empty list
             for idx, item in enumerate(obj):
-                _traverse(item, keys + (idx,), output)
+                _traverse(item, keys + [idx], output)
         else:
             output.append((keys, obj))
 
     output = []
     # Start with an empty tuple for the key sequence of the root object
-    _traverse(data, tuple(), output)
+    _traverse(data, [], output)
     # Handle single values and empty structures directly
     if not output:
-        output.append((tuple(), data))
+        output.append(([], data))
     return output
 
 def builder(flat_list):
@@ -70,10 +70,10 @@ def builder(flat_list):
     return root
 
 def is_in(keys,content):
-    return any(is_prefix(keys,entry["keys"]) for entry in content)
+    return any(is_prefix(keys,entry["keys"]) for entry in content.values())
 
 def is_prefix(keys1,keys2):
-    if keys1==tuple():
+    if len(keys1)==0:
         return True
     else:
         return keys2[:len(keys1)]==keys1
@@ -114,7 +114,7 @@ class Item:
         return builder(flat_list)
     
     def __getitem__(self,key):
-        keys=self.keys+(key,)
+        keys=self.keys+[key]
         
         if is_in(keys,self.content):
             return Item(nested=self.nested, keys=keys)
@@ -123,11 +123,11 @@ class Item:
     
     def __setitem__(self, key, value):
         # Construct the full key sequence for the new or updated value
-        keys = self.keys + (key,)
+        keys = self.keys + [key]
         self.nested.set_value(keys, value)
 
     def __delitem__(self, key):
-        keys=self.keys+(key,)
+        keys = self.keys + [key]
 
         if is_in(keys,self.content):
             self.nested.delete_value(keys)
@@ -153,7 +153,7 @@ class Item:
 class Nested(Item):
 
     def __init__(self,openai_api_key=None,title=None,description=None,dimensions=128,precision=5):
-        Item.__init__(self,nested=self,keys=tuple())
+        Item.__init__(self,nested=self,keys=[])
         self.title=title
         self.description=description
         self.dimensions=dimensions
@@ -340,8 +340,17 @@ if __name__=='__main__':
     #store.new_document(title="test",content=data,description="A test data structure.")
     store.load_document("test")
 
-    print(store.search("Where does Manon live ?"))
+    doc=store.store['test']
 
+    doc['users']['Aurélien']=dict(
+        age=37,
+        job="Cook",
+        city="Rouen"
+    )
+
+    
+
+    print(doc.search("Dans quelle cité l'utilisateur Aurélien habite-t-il ?"))
 
 
 
