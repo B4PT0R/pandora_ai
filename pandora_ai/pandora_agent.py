@@ -51,6 +51,7 @@ from objdict_bf import objdict
 from console import Console
 from retrieval import DocumentStore
 from get_text import get_text
+from google_search import init_google_search
 import base64
 import requests
 from regex_tools import process_regex,split,pack
@@ -1172,12 +1173,11 @@ class Pandora:
             )
 
         if 'websearch' in self.builtin_tools:
-            from google_search import init_google_search
             google_custom_search_api_key=google_custom_search_api_key or os.getenv('GOOGLE_CUSTOM_SEARCH_API_KEY')
             google_custom_search_cx=google_custom_search_cx or os.getenv('GOOGLE_CUSTOM_SEARCH_CX') 
-            google_search=init_google_search(api_key=google_custom_search_api_key,cse_id=google_custom_search_cx)
+            search=init_google_search(api_key=google_custom_search_api_key,cse_id=google_custom_search_cx)
             def websearch(query,num=5,start=1,type='web'):
-                self.observe(google_search(query,num=num,start=start,type=type))
+                self.observe(search(query,num=num,start=start,type=type))
             
             self.add_tool(
                 name="websearch",
