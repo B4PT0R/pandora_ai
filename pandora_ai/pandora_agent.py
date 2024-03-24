@@ -926,8 +926,8 @@ class Pandora:
         The interpreter's stdout is visible to the user and redirected as system messages in your context feed for feedback.
         The other parts of your response will be displayed as markdown chat messages to the user (KaTeX is supported).
 
-        Any time you decide to run python code, another turn of completion will start automatically after execution to let you review it and decide the next step.
-        To pass the turn back to the user, just don't run any python code.
+        Any time you decide to run python code, let it execute first before messaging the user. A new turn of completion will start automatically after execution to let you review it and provide an informed response to the user.
+        To pass the turn back to the user, just don't run any python code in your response.
 
         On top of popular python libraries that you may import in your python scripts, some specific tools are predeclared in your interpreter's namespace to help you deal with specific tasks.
         These tools and how you should use them in your scripts will be detailed in the 'TOOLS' section below.
@@ -937,7 +937,7 @@ class Pandora:
         Plan your strategy and break down complex tasks in smaller steps, using possibly several turns of completion to achieve the task incrementally.
         In case you run into unexpected execution issues or don't what/how to do, default back to asking the user for guidance.
 
-        Simplified example of the assistant expected behaviour:
+        Simplified example of how you should format your responses:
 
         Example:
 
@@ -945,12 +945,10 @@ class Pandora:
         What is the factorial of 12?
                                 
         Assistant:
-        Let's check this out with a simple script.
         ```run_python
         import math
         math.factorial(12)
         ```
-        Now, I'll let this script execute.
                                 
         Interpreter:
         479001600
@@ -978,6 +976,7 @@ class Pandora:
             ]
         self.token_processor=TokenProcessor(size=5,processing_funcs=processing_funcs)
         self.store=DocumentStore(openai_api_key=self.client.api_key,folder=os.path.join(self.work_folder,"documents"))
+        self.init_memory()
         self.init_console(console=console,input_hook=input_hook)
         self.init_TTS(text_to_audio_hook=text_to_audio_hook,audio_play_hook=audio_play_hook,thread_decorator=thread_decorator)
         self.init_tools(tools=tools,builtin_tools=builtin_tools,google_custom_search_api_key=google_custom_search_api_key,google_custom_search_cx=google_custom_search_cx)
@@ -1031,17 +1030,19 @@ class Pandora:
         if not os.path.exists(self.config_folder):
             os.mkdir(self.config_folder)
 
-        memory_file=os.path.join(self.config_folder,'memory.json')
-        if not os.path.exists(memory_file):
-            with open(memory_file,'w') as f:
-                json.dump({},f)
-        self.memory=objdict.load(_file=memory_file)
-
         startup_file=os.path.join(self.config_folder,'startup.py')
         if not os.path.exists(startup_file):
             with open(startup_file,'w') as f:
                 f.write('')
         self.startup_file=startup_file
+
+    def init_memory(self):
+        memory_file=os.path.join(self.work_folder,'documents','memory.json')
+        if not os.path.exists(memory_file):
+            self.store.new_document(type='json',title='memory',content={},description="Memory storage of the AI assistant.")
+        else:
+            self.store.load_document("memory")
+        self.memory=self.store.get_document("memory")
 
     def init_console(self,console=None,input_hook=None):
         """
@@ -1167,7 +1168,7 @@ class Pandora:
         if 'memory' in self.builtin_tools:
             self.add_tool(
                 name="memory",
-                description="memory # a custom nested data structure linked to a JSON file for long lasting storage implementing semantic retrieval. Supports dump() method to save the content to the file.",
+                description="memory # a special document of json type in your document store used for long lasting memory of various data and contextual semantic retrieval.",
                 obj=self.memory,
                 type="object"
             )
@@ -1197,16 +1198,16 @@ class Pandora:
             
             self.add_tool(
                 name="get_webdriver",
-                description="driver=get_webdriver() # This function returns a preconfigured headless firefox selenium webdriver suitable tu run in the current environment.",
+                description="driver=get_webdriver() # Whenever you need it to interact with webpages, use this preconfigured headless firefox webdriver suitable tu run in the current environment.",
                 obj=get_webdriver,
                 example="""
-                # Spawn a webdriver
+                # Spawn the webdriver
                 driver = get_webdriver()
                 # Use it to open Wikipedia webpage (for example)
                 driver.get('https://www.wikipedia.org')
                 # Do other things...
                 # Close it
-                driver.close()
+                driver.quit()
                 """
             )
 
@@ -1506,7 +1507,9 @@ class Pandora:
         infos=self.infos+[
                 "Default language: '<<self.config.language>>'",
                 "Your default workfolder: '<<self.work_folder>>' (save files you create there, and initial cwd of the python session).",
-                "Your config folder: '<<self.config_folder>>' (where your memory file, startup file and optional preprompts files are)"
+                "Your config folder: '<<self.config_folder>>' (where your startup file, configuration file and optional preprompts files are)",
+                "Titles available in the document store: <<self.store.get_titles()>>",
+                "Documents currently loaded in the document store: <<self.store.get_loaded()>>"
                 ]
         if infos:
             s="#Additional informations:\n"
@@ -1526,28 +1529,16 @@ class Pandora:
             return [example]
         else:
             return []
-
-    def get_memory(self):
-        """
-        Get the memory file content as a system message for context (if implemented)
-        """
-        if self.config.uses_memory:
-            s="#Memory Contents:\n"
-            s+=self.memory.dumps()
-            memory=Message(content=s,role="system",name="Memory")
-            return [memory]
-        else:
-            return []
         
     def get_retrieved(self):
         prompts=self.get_prompts()
         output=[]
         if prompts:
             if self.store.get_loaded():
-                results=self.store.search(query='\n'.join(prompt.content for prompt in prompts),num=20,threshold=0.2)
-                if results:
-                    msg=Message(content=str(results),role="system",name="DocumentStore")
-                    output.append(msg)
+                s="# Possibly relevant fragments retrieved from documents loaded in the document store:\n"
+                s+=str(self.store.search(query='\n'.join(prompt.content for prompt in prompts),num=20,threshold=0.2))
+                msg=Message(content=s,role="system",name="DocumentStore")
+                output.append(msg)
         return output
 
 
@@ -1627,14 +1618,13 @@ class Pandora:
         prompts=self.get_prompts()
         preprompt=self.get_preprompt()
         example=self.get_example()
-        memory=self.get_memory()
         info=self.get_infos()
         temp=self.get_temp()
         tools=self.get_tools()
         retrieved=self.get_retrieved()
-        count=total_tokens(preprompt+tools+info+example+memory+temp+prompts+retrieved)
+        count=total_tokens(preprompt+tools+info+example+temp+prompts+retrieved)
         queued=self.get_queued(count)
-        context=preprompt+tools+info+example+memory+Sort(queued+temp+prompts+retrieved)
+        context=preprompt+tools+info+example+Sort(queued+temp+prompts+retrieved)
         self.send_prompts_to_queue()
         return context
 

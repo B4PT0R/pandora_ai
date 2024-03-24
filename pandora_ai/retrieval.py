@@ -70,6 +70,9 @@ def split_text(text, max_tokens):
     return chunks
 
 def flattener(data):
+    if data is None:
+        return []
+    
     def _traverse(obj, keys, output):
         if isinstance(obj, dict):
             if not obj:
@@ -93,12 +96,15 @@ def flattener(data):
     return output
 
 def builder(flat_list):
+    if not flat_list:
+        return None
+
     # Handle single value case
-    if len(flat_list) == 1 and flat_list[0][0] == ():
+    if len(flat_list) == 1 and len(flat_list[0][0]) == 0:
         return flat_list[0][1]
 
     # Determine the root type from the first key sequence if the flat list is not empty
-    root = [] if flat_list and isinstance(flat_list[0][0][0], int) else {}
+    root = [] if flat_list and flat_list[0][0] and isinstance(flat_list[0][0][0], int) else {}
     
     for keys, value in flat_list:
         # Handle empty structure case
@@ -171,6 +177,9 @@ class Item:
         # Reconstruct the nested substructure from the flat content
         flat_list = [(entry['keys'][len(self.keys):], entry['value']) for entry in self.content.values()]
         return builder(flat_list)
+    
+    def assign(self,value):
+        self.document.set_value(self.keys,value)
     
     def __getitem__(self,key):
         keys=self.keys+[key]
@@ -278,6 +287,13 @@ class JsonDocument(Item,Document):
             self.load_json_data(json_data)
 
     def set_value(self, keys, value):
+
+        if "" in self.data['content']:
+            del self.data['content'][""]
+
+        # Check and remove existing content (if any) under the specified keys
+        self.delete_value(keys)
+
         # Prepare the string and embedding for the new value
         # If the value is structured, it is first converted to a flat list of entries
         if isinstance(value, dict) or isinstance(value, list):
@@ -303,8 +319,10 @@ class JsonDocument(Item,Document):
             )
 
     def delete_value(self, keys):
-        #removes any entries that are prefixed with the key sequence of the deleted item
-        self.data['content'] = {keys_as_str(entry['keys']):entry for entry in self.data['content'].values() if not is_prefix(keys,entry['keys'])}
+        # Remove the entry or nested entries starting with the specified keys
+        to_remove = [key for key in self.data['content'] if is_prefix(keys, key)]
+        for key in to_remove:
+            del self.data['content'][key]
 
 class TextDocument(Document):
 
