@@ -1300,7 +1300,8 @@ class Pandora:
         """
         Adds a message the internal messages history
         """
-        message.content=truncate(message.content,max_tokens=self.config.max_tokens)
+        if not message.tag=='image':
+            message.content=truncate(message.content,max_tokens=self.config.max_tokens)
         self.messages.append(message)
 
     def add_user_prompt(self,content,tag='user_message'):
