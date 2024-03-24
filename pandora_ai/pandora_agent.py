@@ -1177,7 +1177,7 @@ class Pandora:
             google_custom_search_cx=google_custom_search_cx or os.getenv('GOOGLE_CUSTOM_SEARCH_CX') 
             google_search=init_google_search(api_key=google_custom_search_api_key,cse_id=google_custom_search_cx)
             def websearch(query,num=5,start=1,type='web'):
-                self.observe(google_search(query,num,start,type))
+                self.observe(google_search(query,num=num,start=start,type=type))
             
             self.add_tool(
                 name="websearch",
