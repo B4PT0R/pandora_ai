@@ -10,6 +10,65 @@ def normalize(vect,precision=5):
     inv_norm=1.0/np.linalg.norm(vect,ord=2)
     return [round(x_i*(inv_norm),precision) for x_i in vect]
 
+def token_count(string):
+    """
+    count tokens in a string
+    """
+    return len(tokenizer.encode(string))
+
+def split_string(string, delimiters):
+    """
+    splits a string according to a chosen set of delimiters
+    """
+    substrings = []
+    current_substring = ""
+    i = 0
+    while i < len(string):
+        for delimiter in delimiters:
+            if string[i:].startswith(delimiter):
+                current_substring += delimiter
+                if current_substring:
+                    substrings.append(current_substring)
+                    current_substring = ""
+                i += len(delimiter)
+                break
+        else:
+            current_substring += string[i]
+            i += 1
+    if current_substring:
+        substrings.append(current_substring)
+    return substrings
+
+def split_text(text, max_tokens):
+    """
+    split a text into chunks of maximal token length, not breaking sentences in halves.
+    """
+    # Tokenize the text into sentences
+    sentences = split_string(text,delimiters=["\n",". ", "! ", "? ", "... ", ": ", "; "])
+    
+    chunks = []
+    current_chunk = ""
+    current_token_count = 0
+    
+    for sentence in sentences:
+        sentence_token_count = token_count(sentence)
+        
+        # If adding the next sentence exceeds the max_tokens limit,
+        # save the current chunk and start a new one
+        if current_token_count + sentence_token_count > max_tokens:
+            chunks.append(current_chunk.strip())
+            current_chunk = ""
+            current_token_count = 0
+        
+        current_chunk += sentence
+        current_token_count += sentence_token_count
+    
+    # Add the remaining chunk if it's not empty
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    
+    return chunks
+
 def flattener(data):
     def _traverse(obj, keys, output):
         if isinstance(obj, dict):
@@ -95,14 +154,14 @@ def subdict(original_dict, keys):
 
 class Item:
 
-    def __init__(self,nested=None,keys=None):
+    def __init__(self,document=None,keys=None):
         self.keys=keys
-        self.nested=nested
+        self.document=document
 
     @property
     def content(self):
         content = {}
-        for entry in self.nested.table['content'].values():
+        for entry in self.document.data['content'].values():
             if is_prefix(self.keys,entry["keys"]):
                 content[keys_as_str(entry["keys"])]=entry
         return content
@@ -117,20 +176,20 @@ class Item:
         keys=self.keys+[key]
         
         if is_in(keys,self.content):
-            return Item(nested=self.nested, keys=keys)
+            return Item(document=self.document, keys=keys)
         else:
             raise KeyError(f"Key {key} does not exist.")
     
     def __setitem__(self, key, value):
         # Construct the full key sequence for the new or updated value
         keys = self.keys + [key]
-        self.nested.set_value(keys, value)
+        self.document.set_value(keys, value)
 
     def __delitem__(self, key):
         keys = self.keys + [key]
 
         if is_in(keys,self.content):
-            self.nested.delete_value(keys)
+            self.document.delete_value(keys)
         else:
             raise KeyError(f"Key {key} does not exist.")
     
@@ -140,8 +199,8 @@ class Item:
     def __str__(self):
         return str(self.value)
     
-    def search(self,query,num=3,threshold=0.3):
-        vect=self.nested.embed([query])[0]
+    def search(self,query,num=10,threshold=0.25):
+        vect=self.document.store.embed([query],self.document.data['precision'],self.document.data['dimensions'])[0]
         results=[]
         for entry in self.content.values():
             results.append((entry["string"],np.dot(vect,entry["embedding"])))
@@ -149,61 +208,45 @@ class Item:
         results=list(filter(lambda result:result[1]>=threshold,results))
         return results[:num]
 
+class Document:
 
-class Nested(Item):
+    def __init__(self,store,file=None):
+        self.store=store
+        self.file=file
+        self.data=dict()
 
-    def __init__(self,openai_api_key=None,title=None,description=None,dimensions=128,precision=5):
-        Item.__init__(self,nested=self,keys=[])
-        self.title=title
-        self.description=description
-        self.dimensions=dimensions
-        self.precision=precision
-        self.client=OpenAI(api_key=openai_api_key or os.getenv('OPENAI_API_KEY'),timeout=3)
-        self.table=dict(
-            title=self.title,
-            description=self.description,
-            dimensions=self.dimensions,
-            precision=self.precision,
+    def load(self,file=None):
+        self.file=file or self.file
+        if os.path.isfile(self.file) and file.endswith('.json'):
+            with open(file) as f:
+                self.data=json.load(f)
+
+    def dump(self,file=None):
+        self.file=file or self.file
+        if self.file.endswith('.json'):
+            with open(self.file,'w') as f:
+                json.dump(self.data,f)
+
+    def set_data(self,data):
+        self.data=data
+
+
+
+class JsonDocument(Item,Document):
+
+    def __init__(self,store,file=None):
+        Item.__init__(self,document=self,keys=[])
+        Document.__init__(self,store,file)           
+
+    def load_data(self,title,content,description,precision,dimensions):
+        self.data=dict(
+            title=title,
+            type='json',
+            description=description,
+            precision=precision,
+            dimensions=dimensions,
             content=dict()
         )
-
-    def embed(self,strings):
-        success=False
-        while not success:
-            try:
-                response=self.client.embeddings.create(
-                    input=strings,
-                    model="text-embedding-3-small",
-                    dimensions=self.dimensions
-                )
-            except Exception as e:
-                print(str(e))
-                success=False
-            else:
-                success=True
-        embeddings=[normalize(response.data[i].embedding,self.precision) for i in range(len(strings))]
-        return embeddings
-    
-    def load_document(self,file):
-        if os.path.isfile(file) and file.endswith('.json'):
-            with open(file) as f:
-                self.table=json.load(f)
-            self.title=self.table["title"]
-            self.description=self.table["description"]
-            self.precision=self.table["precision"]
-            self.dimensions=self.table["dimensions"]
-
-    def save_document(self,file):
-        if file.endswith('.json'):
-            with open(file,'w') as f:
-                self.table["title"]=self.title
-                self.table["description"]=self.description
-                self.table["precision"]=self.precision
-                self.table["dimensions"]=self.dimensions
-                json.dump(self.table,f)
-            
-
-    def load_content(self,content):
         if isinstance(content,str) and content.endswith(".json") and os.path.isfile(content):
             self.load_json_file(json_file=content)
         elif isinstance(content,str):
@@ -213,11 +256,11 @@ class Nested(Item):
 
     def load_json_data(self,json_data):
         entries=flattener(json_data)
-        strings=[as_string(self.title,entry) for entry in entries]
-        embeddings=self.embed(strings)
+        strings=[as_string(self.data['title'],entry) for entry in entries]
+        embeddings=self.store.embed(strings,self.data['precision'],self.data['dimensions'])
         for i in range(len(entries)):
             keys,value=entries[i]
-            self.table['content'][keys_as_str(keys)]=dict(
+            self.data['content'][keys_as_str(keys)]=dict(
                 keys=keys,
                 value=value,
                 string=strings[i],
@@ -239,21 +282,20 @@ class Nested(Item):
         # If the value is structured, it is first converted to a flat list of entries
         if isinstance(value, dict) or isinstance(value, list):
             entries = [(keys+entry[0],entry[1]) for entry in flattener(value)]
-            strings=[as_string(self.title,entry) for entry in entries]
-            embeddings=self.embed(strings)
+            strings=[as_string(self.data['title'],entry) for entry in entries]
+            embeddings=self.store.embed(strings,self.data['precision'],self.data['dimensions'])
             for i in range(len(entries)):
                 keys,value=entries[i]
-                self.table['content'][keys_as_str(keys)]=dict(
+                self.data['content'][keys_as_str(keys)]=dict(
                     keys=keys,
                     value=value,
                     string=strings[i],
                     embedding=embeddings[i]
                 )
         else:
-            string = as_string(self.title,(keys, value))
-            embedding = self.embed([string])[0]
-            # Otherwise, add a new entry
-            self.table['content'][keys_as_str(keys)]=dict(
+            string = as_string(self.data['title'],(keys, value))
+            embedding = self.store.embed([string],self.data['precision'],self.data['dimensions'])[0]
+            self.data['content'][keys_as_str(keys)]=dict(
                 keys= keys,
                 value= value,
                 string=string,
@@ -262,20 +304,71 @@ class Nested(Item):
 
     def delete_value(self, keys):
         #removes any entries that are prefixed with the key sequence of the deleted item
-        self.table['content'] = {keys_as_str(entry['keys']):entry for entry in self.table['content'].values() if not is_prefix(keys,entry['keys'])}
+        self.data['content'] = {keys_as_str(entry['keys']):entry for entry in self.data['content'].values() if not is_prefix(keys,entry['keys'])}
 
+class TextDocument(Document):
 
-class JsonRetriever:
+    def __init__(self,store,file=None,chunk_size=100):
+        Document.__init__(self,store=store,file=file)
+        self.chunk_size=chunk_size
 
-    def __init__(self,openai_api_key=None,folder='./json_documents'):
+    def load_data(self,title,content,description,precision,dimensions):
+        self.data=dict(
+            title=title,
+            type='text',
+            description=description,
+            precision=precision,
+            dimensions=dimensions,
+            content=dict()
+        )
+        strings=split_text(content,self.chunk_size)
+        embeddings=self.store.embed(strings,precision,dimensions)
+        n=0
+        for i in range(len(strings)):
+            keys=[n+1,n+len(strings[i])]
+            self.data['content'][str(keys)]=dict(keys=keys,string=strings[i],embedding=embeddings[i])
+            n+=len(strings[i])
+
+    def search(self,query,num=10,threshold=0.25):
+        vect=self.store.embed([query],self.data['precision'],self.data['dimensions'])[0]
+        results=[]
+        for entry in self.data["content"].values():
+            results.append((entry['string'],np.dot(vect,entry["embedding"])))
+        results.sort(key=lambda result: result[1], reverse=True)
+        results=list(filter(lambda result:result[1]>=threshold,results))
+        return results[:num]
+
+class DocumentStore:
+
+    def __init__(self,openai_api_key=None,folder='./documents',dimensions=128,precision=5):
         self.openai_api_key=openai_api_key
+        self.client=OpenAI(api_key=openai_api_key or os.getenv("OPENAI_API_KEY"))
+        self.dimensions=dimensions
+        self.precision=precision
         self.folder=folder
         self.store={}
         if not os.path.exists(self.folder):
             os.makedirs(self.folder)
 
+    def embed(self,strings,precision,dimensions):
+        success=False
+        while not success:
+            try:
+                response=self.client.embeddings.create(
+                    input=strings,
+                    model="text-embedding-3-small",
+                    dimensions=dimensions
+                )
+            except Exception as e:
+                print(str(e))
+                success=False
+            else:
+                success=True
+        embeddings=[normalize(response.data[i].embedding,precision) for i in range(len(strings))]
+        return embeddings
+
     def get_loaded(self):
-        return [dict(title=doc.title,description=doc.description) for doc in self.store.values()]
+        return [dict(title=doc.data['title'],description=doc.data['description']) for doc in self.store.values()]
     
     def get_titles(self):
         return [os.path.basename(file).split('.')[0] for file in os.listdir(self.folder)]
@@ -283,27 +376,42 @@ class JsonRetriever:
     def save_document(self,title):
         if title in self.store:
             file=os.path.join(self.folder,f"{title}.json")
-            self.store[title].save_document(file)
+            self.store[title].dump()
+            print(f"Successfully saved document '{title}' : path='{file}'")
 
+    def get_document(self,title):
+        if title in self.store:
+            return self.store[title]
+            
     def load_document(self,title):
         if title not in self.store:
             file=os.path.join(self.folder,f"{title}.json")
             if os.path.isfile(file):
-                self.store[title]=Nested(self.openai_api_key,title=title)
-                self.store[title].load_document(file)
-            else:
-                self.store[title]=Nested(self.openai_api_key,title=title)
+                with open(file) as f:
+                    data=json.load(f)
+                if data['type']=='json':
+                    doc=JsonDocument(store=self,file=file)
+                elif data['type']=='text':
+                    doc=TextDocument(store=self,file=file)
+                doc.set_data(data)
+                self.store[title]=doc
+                print(f"Successfully loaded document '{title}' : path='{file}'")
 
     def close_document(self,title):
         if title in self.store:
             del self.store[title]
+            print(f"Successfully closed document '{title}'")
 
-    def new_document(self,title,content,description):
-        self.store[title]=Nested(self.openai_api_key,title=title,description=description)
-        if content:
-            self.store[title].load_content(content=content)
-        self.save_document(title)
-        print(f"Successfully created document '{title}' : path='{self.folder}/{title}.json'")
+    def new_document(self,type,title,content,description,precision=5,dimensions=128):
+        file=os.path.join(self.folder,f"{title}.json")
+        if type=='json':
+            doc=JsonDocument(store=self,file=file)
+        elif type=='text':
+            doc=TextDocument(store=self,file=file)
+        doc.load_data(title=title,content=content,description=description,precision=precision,dimensions=dimensions)
+        self.store[title]=doc
+        doc.dump()
+        print(f"Successfully created document '{title}' : path='{file}'")
 
     def search(self,query,titles='all',num=5,threshold=0.3):
         if titles=='all':
@@ -335,12 +443,11 @@ if __name__=='__main__':
         )
     )
 
-    store=JsonRetriever()
+    store=DocumentStore()
 
-    #store.new_document(title="test",content=data,description="A test data structure.")
+    #store.new_document(type='json',title="test",content=data,description="A test data structure.")
     store.load_document("test")
-
-    doc=store.store['test']
+    doc=store.get_document('test')
 
     doc['users']['Aurélien']=dict(
         age=37,
@@ -348,9 +455,19 @@ if __name__=='__main__':
         city="Rouen"
     )
 
-    
+    print(store.search("Dans quelle ville l'utilisateur Aurélien habite-t-il ?"))
 
-    print(doc.search("Dans quelle cité l'utilisateur Aurélien habite-t-il ?"))
+    from get_text import get_text
+
+    store.new_document(type='text',title="devin_townsend",description="Wikipédia article about Devin Townsend",content=get_text('./test.txt'))
+    
+    print(store.search("Où est né Devin Townsend ?"))
+
+
+
+
+
+
 
 
 

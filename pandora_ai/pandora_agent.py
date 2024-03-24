@@ -49,8 +49,7 @@ import time
 from datetime import datetime
 from objdict_bf import objdict
 from console import Console
-from text_retriever import TextRetriever
-from json_retriever import JsonRetriever
+from retrieval import DocumentStore
 from get_text import get_text
 import base64
 import requests
@@ -977,8 +976,7 @@ class Pandora:
                 lambda chunk:chunk.replace(r"\]","$$")
             ]
         self.token_processor=TokenProcessor(size=5,processing_funcs=processing_funcs)
-        self.text_retriever=TextRetriever(openai_api_key=self.client.api_key,folder=os.path.join(self.work_folder,"text_documents"))
-        self.json_retriever=JsonRetriever(openai_api_key=self.client.api_key,folder=os.path.join(self.work_folder,"json_documents"))
+        self.store=DocumentStore(openai_api_key=self.client.api_key,folder=os.path.join(self.work_folder,"documents"))
         self.init_console(console=console,input_hook=input_hook)
         self.init_TTS(text_to_audio_hook=text_to_audio_hook,audio_play_hook=audio_play_hook,thread_decorator=thread_decorator)
         self.init_tools(tools=tools,builtin_tools=builtin_tools,google_custom_search_api_key=google_custom_search_api_key,google_custom_search_cx=google_custom_search_cx)
@@ -1073,7 +1071,7 @@ class Pandora:
         """
         self.tools=tools or {}
         self.load_tools()
-        self.builtin_tools=builtin_tools or ['observe','generate_image','memory','open_in_browser','websearch','get_webdriver','get_text','text_retriever',"json_retriever"]
+        self.builtin_tools=builtin_tools or ['observe','generate_image','memory','open_in_browser','websearch','get_webdriver','get_text','document_store']
 
         if 'observe' in self.builtin_tools:
             self.add_tool(
@@ -1119,40 +1117,26 @@ class Pandora:
                 required=['source'],
             )
 
-
-        if 'text_retriever' in self.builtin_tools:
+        if 'document_store' in self.builtin_tools:
             self.add_tool(
-                name='text_retriever',
-                obj=self.text_retriever,
+                name='document_store',
+                obj=self.store,
                 type='object',
                 description="""
-                text_retriever # A document store used to implement your chunk-retrieval mechanism on text data. Retrieval is automatic according to semantic relevance of loaded document chunks with respect to the current context.
+                document_store # A document store used to implement your data-retrieval mechanism. Retrieval is automatic according to semantic relevance of loaded content with respect to the current context.
                 # Methods:
-                text_retriever.get_titles() # returns the list of titles of documents saved as files in the document store (can be loaded in memory).
-                text_retriever.get_loaded() # returns the list of titles of documents currently loaded in memory and active for chunk retrieval.
-                text_retriever.new_document(title,text,description) # Create a new stored document from a givent text content (chunked, embedded, saved and loaded for semantic search).
-                text_retriever.load_document(title) # Loads a document in memory.
-                text_retriever.close_document(title) # unloads a document from memory.
-                """
-            )
-
-        if 'json_retriever' in self.builtin_tools:
-            self.add_tool(
-                name='json_retriever',
-                obj=self.json_retriever,
-                type='object',
-                description="""
-                json_retriever # A document store used to implement your data-retrieval mechanism on JSON data. Retrieval is automatic according to semantic relevance of loaded content with respect to the current context.
-                # Methods:
-                json_retriever.get_titles() # returns the list of titles of documents saved as files in the document store (can be loaded in memory).
-                json_retriever.get_loaded() # returns the list of titles of documents currently loaded in memory and active for chunk retrieval.
-                json_retriever.new_document(title,content,description) # Create a new stored document from a given json content (either data, string or file) that is parsed, embedded and loaded for semantic search.
-                json_retriever.load_document(title) # Loads a document in memory.
-                json_retriever.close_document(title) # unloads a document from memory.
-                json_retriever.search(query) # returns most relevant pieces of informations found in the loaded documents related to a query.
-                document=json_retriever.store[title] # access the document object in the store
+                document_store.get_titles() # returns the list of titles of documents saved as files in the document store (can be loaded in memory).
+                document_store.get_loaded() # returns the list of titles of documents currently loaded in memory and active for chunk retrieval.
+                document_store.new_document(type,title,content,description) # (type='text' or 'json') Create a new stored document from a given content (either text or json_data, json_string, json_file) that is parsed, embedded and loaded for semantic search.
+                document_store.load_document(title) # Loads a document in memory.
+                document_store.close_document(title) # unloads a document from memory.
+                document_store.search(query) # returns most relevant pieces of informations found in the loaded documents related to a query.
+                document=document_store.get_document(title) # access the document object in the store
+                document.search(query) # search in the document only
+                # for a json document:
                 data=document['example']['key']['sequence'] # access data in the document
-                document['example']['key']['sequence']=new_data # change data in the documentm
+                document['example']['key']['sequence']=new_data # change data in the document
+                document.dump() # save changes
                 """
             )
 
@@ -1559,15 +1543,10 @@ class Pandora:
         prompts=self.get_prompts()
         output=[]
         if prompts:
-            if self.text_retriever.get_loaded():
-                results=self.text_retriever.search(query='\n'.join(prompt.content for prompt in prompts),num=20,threshold=0.2)
+            if self.store.get_loaded():
+                results=self.store.search(query='\n'.join(prompt.content for prompt in prompts),num=20,threshold=0.2)
                 if results:
-                    msg=Message(content=str(results),role="system",name="TextRetriever")
-                    output.append(msg)
-            if self.json_retriever.get_loaded():
-                results=self.json_retriever.search(query='\n'.join(prompt.content for prompt in prompts),num=20,threshold=0.2)
-                if results:
-                    msg=Message(content=str(results),role="system",name="JsonRetriever")
+                    msg=Message(content=str(results),role="system",name="DocumentStore")
                     output.append(msg)
         return output
 
