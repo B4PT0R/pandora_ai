@@ -11,7 +11,7 @@ from googleapiclient.discovery import build
 def subdict(original_dict, keys):
     return {k: original_dict[k] for k in keys if k in original_dict}
 
-def google_search(api_key,cse_id,query, num=5, start=1, type='web'):
+def google_search(api_key,cse_id,query,num=5, start=1, type='web'):
     service = build("customsearch", "v1", developerKey=api_key)
     ns = num // 10
     r = num % 10
@@ -45,10 +45,9 @@ def google_search(api_key,cse_id,query, num=5, start=1, type='web'):
     return results
 
 def init_google_search(api_key,cse_id):
-
-    def g_search(query, num=5,start=1, type='web'):
+    def g_search(query,num=5,start=1,type='web'):
         if api_key and cse_id:
-            return google_search(api_key,cse_id,query, num=num,start=start, type=type)
+            return google_search(api_key,cse_id,query,num=num,start=start,type=type)
         else:
             return None
     return g_search
