@@ -922,22 +922,17 @@ class Pandora:
         You're <<self.name>>, an advanced AI-powered python console resulting of the combination of the latest OpenAI model and a built-in Python interpreter.
         The user can use you as a regular python console in which he can run scripts, interact with you in many languages, or pass you files/images that you may analyze using your multimodal abilities.
         As an AI model, you've been trained to use the Python interpreter as your primary toolbox to perform various tasks. 
-        Your responses are parsed and all parts matching the regex pattern r'```run_python(.*?)```' will get executed directly in your interpreter.
+        Your responses are parsed and all parts matching the regex pattern r'```run_python(.*?)```' will get executed directly in your interpreter after your response is submitted.
         The interpreter's stdout is visible to the user and redirected as system messages in your context feed for feedback.
-        The other parts of your response will be displayed as markdown chat messages to the user (KaTeX is supported).
-
-        Any time you decide to run python code, let it execute first before messaging the user. A new turn of completion will start automatically after execution to let you review it and provide an informed response to the user.
+        Any time you choose to run python code, a new turn of completion will start automatically after execution to let you access the results and provide an informed response to the user.
         To pass the turn back to the user, just don't run any python code in your response.
+        The other parts of your response will be displayed as regular markdown chat messages to the user (KaTeX is supported).
+        Once you're done generating, please use the special '#END#' token to end your response. This will enact pushing the [Enter] key to submit your message.
 
-        On top of popular python libraries that you may import in your python scripts, some specific tools are predeclared in your interpreter's namespace to help you deal with specific tasks.
-        These tools and how you should use them in your scripts will be detailed in the 'TOOLS' section below.
+        What you should NOT do:
 
-        Don't make up answers, use your vast knowledge in combination with a smart use of available tools to craft informed responses to the user.
 
-        Plan your strategy and break down complex tasks in smaller steps, using possibly several turns of completion to achieve the task incrementally.
-        In case you run into unexpected execution issues or don't what/how to do, default back to asking the user for guidance.
-
-        Simplified example of how you should format your responses:
+        Simplified example of how you should organize your responses:
 
         Example:
 
@@ -945,16 +940,19 @@ class Pandora:
         What is the factorial of 12?
                                 
         Assistant:
+        Let's check it out:
         ```run_python
         import math
         math.factorial(12)
         ```
-                                
+        #END#
+                    
         Interpreter:
         479001600
-                                
+             
         Assistant:
         The factorial of 12 is 479001600.
+        #END#
 
         #END OF INSTRUCTIONS
         """
@@ -1061,8 +1059,11 @@ class Pandora:
             'user_codeblock':self.add_user_codeblock
         })
         self.console.run(textwrap.dedent(f"""
-            import os
+            import os, sys
             os.chdir({self.instance_name}.work_folder)
+            cwd=os.getcwd()
+            if cwd not in sys.path:
+                sys.path.append(cwd)
         """))
 
     def init_tools(self,tools=None,builtin_tools=None, google_custom_search_api_key=None, google_custom_search_cx=None):
@@ -1302,6 +1303,8 @@ class Pandora:
         """
         if not message.tag=='image':
             message.content=truncate(message.content,max_tokens=self.config.max_tokens)
+            if message.tag=='assistant_message':
+                message.content.append('#END#')
         self.messages.append(message)
 
     def add_user_prompt(self,content,tag='user_message'):
@@ -1542,7 +1545,6 @@ class Pandora:
                 output.append(msg)
         return output
 
-
     def get_messages(self,type='all',tag='all'):
         """
         Utility method allowing to gather all messages matching a given type or tag, and return them sorted according to their timestamp.
@@ -1645,14 +1647,14 @@ class Pandora:
             max_tokens=self.config.max_tokens,
             temperature=self.config.temperature,
             top_p=self.config.top_p,
-            stream=True
+            stream=True            
         )
 
         success=False
         err=0
         while not success and err<2:
             try:
-                response = self.client.chat.completions.create(**kwargs)
+                response = self.client.chat.completions.create(**kwargs,stop=['#END#'])
             except Exception as e:
                 print(str(e))
                 err+=1
@@ -1707,7 +1709,7 @@ class Pandora:
         err=0
         while not success and err<2:
             try:
-                answer = self.client.chat.completions.create(**kwargs)
+                answer = self.client.chat.completions.create(**kwargs,stop=['#END#'])
             except Exception as e:
                 print(str(e))
                 err+=1
@@ -1719,7 +1721,7 @@ class Pandora:
         else:
             content=answer.choices[0].message.content.strip()+'\n'
 
-        msg=Message(content=content,role="assistant",name=self.name)
+        msg=Message(content=content,role="assistant",name=self.name,tag="assistant_message")
         self.add_message(msg)
         self.response=content
         return content
@@ -2048,5 +2050,38 @@ class AIFunction(Pandora):
         self.config.update(
             model="gpt-3.5-turbo",
             temperature=0.6
-        )
+        )    
+
+class Worker:
+
+    default_config=dict(
+        model="gpt-3.5-turbo",
+        temperature=1,
+        top_p=1,
+        max_tokens=1000
+    )
+
+    def __init__(self,openai_api_key=None,preprompt=None,**kwargs):
+        self.client=OpenAI(api_key=openai_api_key or os.getenv("OPENAI_API_KEY"))
+        self.preprompt=textwrap.dedent(preprompt)
+        self.config=Worker.default_config
+        self.config.update(kwargs)
+
+    def gen_response(self,msgs):
+
+        response = self.client.chat.completions.create(
+                messages=msgs,
+                **self.config
+            )
         
+        return response.choices[0].message.content.strip()
+    
+    def __call__(self,prompt=None,**kwargs):
+        msgs=[]
+        preprompt=format(self.preprompt,kwargs)
+        msgs.append(dict(role="system",content=preprompt))
+        if prompt:
+            prompt=format(textwrap.dedent(prompt),kwargs)
+            msgs.append(dict(role="user",content=prompt))
+        return self.gen_response(msgs)
+

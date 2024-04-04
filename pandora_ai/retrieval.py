@@ -201,7 +201,11 @@ class Item:
             self.document.delete_value(keys)
         else:
             raise KeyError(f"Key {key} does not exist.")
-    
+        
+    def __contains__(self,key):
+        keys=self.keys+[key]
+        return is_in(keys,self.content)
+
     def __repr__(self):
         return repr(self.value)
     
